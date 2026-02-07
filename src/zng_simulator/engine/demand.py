@@ -96,6 +96,43 @@ def generate_daily_demand(
             daily_visits = np.round(
                 rng.gamma(shape=shape, scale=scales)
             ).astype(np.int64)
+    
+    elif demand.distribution == "bimodal":
+        # Bimodal: mixture of two Gaussians
+        # Parameters: peak_ratio (weight), peak_separation, std_ratio
+        w1 = demand.bimodal_peak_ratio
+        w2 = 1.0 - w1
+        separation = demand.bimodal_peak_separation
+        
+        # Position peaks symmetrically around mean
+        # μ1 = mean - w2 * separation * mean
+        # μ2 = mean + w1 * separation * mean
+        # This ensures: w1*μ1 + w2*μ2 = mean
+        mu1_offsets = -w2 * separation * daily_means
+        mu2_offsets = w1 * separation * daily_means
+        
+        # Standard deviation for each peak
+        std_devs = demand.bimodal_std_ratio * daily_means
+        
+        # Sample from mixture
+        daily_samples = np.zeros(DAYS_PER_MONTH, dtype=np.float64)
+        for i in range(DAYS_PER_MONTH):
+            # Choose which peak to sample from
+            if rng.random() < w1:
+                # Sample from peak 1
+                daily_samples[i] = rng.normal(
+                    daily_means[i] + mu1_offsets[i],
+                    max(std_devs[i], 0.1)
+                )
+            else:
+                # Sample from peak 2
+                daily_samples[i] = rng.normal(
+                    daily_means[i] + mu2_offsets[i],
+                    max(std_devs[i], 0.1)
+                )
+        
+        daily_visits = np.round(daily_samples).astype(np.int64)
+    
     else:
         # Fallback: deterministic (should not happen with Pydantic validation).
         daily_visits = np.round(daily_means).astype(np.int64)

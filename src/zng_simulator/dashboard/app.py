@@ -15,7 +15,11 @@ import io
 import os
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
+from scipy.special import gamma as gamma_func
 
 from zng_simulator.config import (
     ChaosConfig,
@@ -307,6 +311,20 @@ def _card(icon: str, label: str, value: str, accent: str = "#6c5ce7") -> str:
 # ---------------------------------------------------------------------------
 st.sidebar.header("Scenario Inputs")
 
+# --- Simulation (define sim_engine first, needed by other sections) ---
+with st.sidebar.expander("Simulation", expanded=True):
+    sim_horizon = st.number_input("Horizon months", 6, 240, _DEF_SIM.horizon_months, 12)
+    _ENGINES = ["static", "stochastic"]
+    sim_engine = st.selectbox("Engine", _ENGINES, index=_ENGINES.index(_DEF_SIM.engine),
+                              help="Static = Phase 1 deterministic · Stochastic = Phase 2 with noise, degradation cohorts, charger failures")
+    c1, c2 = st.columns(2)
+    sim_mc = c1.number_input("MC runs", 1, 5000, _DEF_SIM.monte_carlo_runs if sim_engine == "stochastic" else 1,
+                             disabled=(sim_engine == "static"),
+                             help="Number of Monte-Carlo iterations (stochastic only)")
+    sim_seed = c2.number_input("Seed", 0, 999999, 42,
+                               disabled=(sim_engine == "static"),
+                               help="Random seed for reproducibility")
+
 # --- Vehicle ---
 with st.sidebar.expander("Vehicle", expanded=True):
     v_name = st.text_input("Vehicle name", _DEF_V.name)
@@ -352,6 +370,12 @@ with st.sidebar.expander("Battery Pack"):
     c1, c2 = st.columns(2)
     p_repl = c1.number_input("Replace ₹", 0, 200000, int(_DEF_P.full_replacement_cost), 1000, key="p_repl")
     p_spare = c2.number_input("Spare/stn ₹", 0, 200000, int(_DEF_P.spare_packs_cost_per_station), 1000, key="p_spare")
+    
+    # Preview button for pack failures
+    if sim_engine == "stochastic":
+        show_pack_failure_preview = st.checkbox("Show failure distribution", value=False, key="pack_failure_preview")
+    else:
+        show_pack_failure_preview = False
 
 pack = PackSpec(
     name=p_name, nominal_capacity_kwh=p_cap, chemistry=p_chem, unit_cost=float(p_cost),
@@ -369,6 +393,8 @@ pack = PackSpec(
 with st.sidebar.expander("Charger Variants"):
     num_chargers = st.number_input("Variants to compare", 1, 5, 1)
     charger_variants: list[ChargerVariant] = []
+    charger_preview_flags: list[bool] = []
+    charger_preview_params: list[dict] = []
     for i in range(num_chargers):
         st.markdown(f"---\n**Charger {i + 1}**")
         c_name = st.text_input("Name", f"Charger-{i+1}", key=f"cn_{i}")
@@ -392,6 +418,22 @@ with st.sidebar.expander("Charger Variants"):
         c_wshape = st.number_input("Weibull β", 0.1, 5.0, _DEF_C.weibull_shape, 0.1, key=f"cwb_{i}",
                                    help="Shape: β<1 infant mortality, β=1 exponential, β>1 wear-out",
                                    disabled=(c_fdist != "weibull"))
+        
+        # Preview button for charger failures
+        if sim_engine == "stochastic":
+            show_preview = st.checkbox("Show failure distribution", value=False, key=f"charger_failure_preview_{i}")
+            charger_preview_flags.append(show_preview)
+            charger_preview_params.append({
+                "name": c_name,
+                "mtbf": float(c_mtbf),
+                "mttr": float(c_mttr),
+                "distribution": c_fdist,
+                "weibull_shape": c_wshape if c_fdist == "weibull" else 1.0,
+            })
+        else:
+            charger_preview_flags.append(False)
+            charger_preview_params.append({})
+        
         charger_variants.append(ChargerVariant(
             name=c_name, purchase_cost_per_slot=float(c_cost), rated_power_w=float(c_power),
             charging_efficiency_pct=c_eff / 100,
@@ -504,39 +546,60 @@ finance_cfg = FinanceConfig(
     dscr_covenant_threshold=f_dscr,
 )
 
-# --- Simulation ---
-with st.sidebar.expander("Simulation", expanded=True):
-    sim_horizon = st.number_input("Horizon months", 6, 240, _DEF_SIM.horizon_months, 12)
-    _ENGINES = ["static", "stochastic"]
-    sim_engine = st.selectbox("Engine", _ENGINES, index=_ENGINES.index(_DEF_SIM.engine),
-                              help="Static = Phase 1 deterministic · Stochastic = Phase 2 with noise, degradation cohorts, charger failures")
-    c1, c2 = st.columns(2)
-    sim_mc = c1.number_input("MC runs", 1, 5000, _DEF_SIM.monte_carlo_runs if sim_engine == "stochastic" else 1,
-                             disabled=(sim_engine == "static"),
-                             help="Number of Monte-Carlo iterations (stochastic only)")
-    sim_seed = c2.number_input("Seed", 0, 999999, 42,
-                               disabled=(sim_engine == "static"),
-                               help="Random seed for reproducibility")
-
 # --- Demand model (Phase 2) ---
 with st.sidebar.expander("Demand Model", expanded=(sim_engine == "stochastic")):
-    _DEMAND_DIST = ["poisson", "gamma"]
-    d_dist = st.selectbox("Distribution", _DEMAND_DIST, index=_DEMAND_DIST.index(_DEF_D.distribution),
-                          disabled=(sim_engine == "static"))
+    st.markdown("**Distribution Type**")
+    _DEMAND_DIST = ["poisson", "gamma", "bimodal"]
+    d_dist = st.selectbox("Distribution", _DEMAND_DIST, 
+                          index=_DEMAND_DIST.index(_DEF_D.distribution) if _DEF_D.distribution in _DEMAND_DIST else 0,
+                          disabled=(sim_engine == "static"),
+                          help="Poisson: simple count data | Gamma: heavier tails | Bimodal: dual-peak patterns")
+    
+    st.markdown("**Daily Variability**")
+    if d_dist == "gamma":
+        d_vol = st.slider("Volatility (CoV)", 0.0, 2.0, _DEF_D.volatility, 0.01,
+                          disabled=(sim_engine == "static"),
+                          help="Coefficient of Variation (σ/μ). 0.15 = mild, 0.3 = moderate, 0.5+ = high variability")
+    elif d_dist == "bimodal":
+        d_vol = _DEF_D.volatility  # Not used for bimodal
+        c1, c2 = st.columns(2)
+        d_bimodal_ratio = c1.slider("Peak 1 weight", 0.1, 0.9, _DEF_D.bimodal_peak_ratio, 0.05,
+                                     disabled=(sim_engine == "static"),
+                                     help="Relative weight of first peak")
+        d_bimodal_sep = c2.slider("Peak separation", 0.1, 2.0, _DEF_D.bimodal_peak_separation, 0.1,
+                                   disabled=(sim_engine == "static"),
+                                   help="Distance between peaks (× mean)")
+        d_bimodal_std = st.slider("Peak width", 0.05, 0.5, _DEF_D.bimodal_std_ratio, 0.05,
+                                   disabled=(sim_engine == "static"),
+                                   help="Standard deviation of each peak (× mean)")
+    else:  # poisson
+        d_vol = _DEF_D.volatility
+        d_bimodal_ratio = _DEF_D.bimodal_peak_ratio
+        d_bimodal_sep = _DEF_D.bimodal_peak_separation
+        d_bimodal_std = _DEF_D.bimodal_std_ratio
+        st.caption("Poisson distribution has fixed CoV = 1/√λ")
+    
+    st.markdown("**Temporal Patterns**")
     c1, c2 = st.columns(2)
-    d_vol = c1.number_input("Volatility (CoV)", 0.0, 2.0, _DEF_D.volatility, 0.05,
-                            disabled=(sim_engine == "static"),
-                            help="Coefficient of variation for Gamma dist. Ignored for Poisson.")
-    d_wknd = c2.number_input("Weekend factor", 0.0, 2.0, _DEF_D.weekend_factor, 0.1,
+    d_wknd = c1.number_input("Weekend factor", 0.0, 2.0, _DEF_D.weekend_factor, 0.05,
                              disabled=(sim_engine == "static"),
-                             help="1.0 = same as weekday; 0.6 = 40% drop on weekends")
-    d_season = st.number_input("Seasonal amplitude", 0.0, 1.0, _DEF_D.seasonal_amplitude, 0.05,
+                             help="Demand multiplier for Sat/Sun")
+    d_season = c2.number_input("Seasonal amplitude", 0.0, 1.0, _DEF_D.seasonal_amplitude, 0.05,
                                disabled=(sim_engine == "static"),
-                               help="0.0 = flat; 0.2 = ±20% annual swing")
+                               help="Peak-to-trough amplitude")
+    
+    # Preview button
+    if sim_engine == "stochastic":
+        show_demand_preview = st.checkbox("Show demand preview", value=False, key="demand_preview_check")
+    else:
+        show_demand_preview = False
 
 demand_cfg = DemandConfig(
     distribution=d_dist, volatility=d_vol,
     weekend_factor=d_wknd, seasonal_amplitude=d_season,
+    bimodal_peak_ratio=d_bimodal_ratio if d_dist == "bimodal" else _DEF_D.bimodal_peak_ratio,
+    bimodal_peak_separation=d_bimodal_sep if d_dist == "bimodal" else _DEF_D.bimodal_peak_separation,
+    bimodal_std_ratio=d_bimodal_std if d_dist == "bimodal" else _DEF_D.bimodal_std_ratio,
 )
 
 sim_cfg = SimulationConfig(
@@ -554,6 +617,489 @@ scenario = Scenario(
 )
 
 run_clicked = st.sidebar.button("Run Simulation", type="primary", use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Demand Model Preview (if enabled)
+# ---------------------------------------------------------------------------
+if show_demand_preview and sim_engine == "stochastic":
+    st.markdown("---")
+    st.subheader("Demand Model Preview")
+    st.caption("Visual preview of the configured demand distribution and temporal patterns")
+    
+    # Calculate base demand rate
+    base_daily_km = vehicle.avg_daily_km
+    base_wh_per_km = vehicle.energy_consumption_wh_per_km
+    base_pack_cap_wh = vehicle.pack_capacity_kwh * 1000
+    base_buffer = vehicle.range_anxiety_buffer_pct
+    base_energy_per_swap = base_pack_cap_wh * (1 - base_buffer)
+    base_swaps_per_day = (base_daily_km * base_wh_per_km) / base_energy_per_swap
+    
+    # Distribution visualization
+    col_dist, col_temporal = st.columns(2)
+    
+    with col_dist:
+        st.markdown("**Daily Demand Distribution**")
+        
+        # Generate samples
+        n_samples = 1000
+        if d_dist == "poisson":
+            lam = max(0.1, base_swaps_per_day)
+            samples = np.random.poisson(lam, n_samples)
+            theoretical_mean = lam
+            theoretical_std = np.sqrt(lam)
+        elif d_dist == "gamma":
+            mean = max(0.1, base_swaps_per_day)
+            cv = d_vol
+            if cv > 0:
+                shape = 1 / (cv ** 2)
+                scale = mean * (cv ** 2)
+                samples = np.random.gamma(shape, scale, n_samples)
+            else:
+                samples = np.full(n_samples, mean)
+            theoretical_mean = mean
+            theoretical_std = mean * cv
+        else:  # bimodal
+            mean = max(0.1, base_swaps_per_day)
+            w1 = demand_cfg.bimodal_peak_ratio
+            w2 = 1.0 - w1
+            sep = demand_cfg.bimodal_peak_separation
+            std_ratio = demand_cfg.bimodal_std_ratio
+            
+            # Peak positions
+            mu1 = mean - w2 * sep * mean
+            mu2 = mean + w1 * sep * mean
+            sigma = std_ratio * mean
+            
+            # Sample from mixture
+            samples = np.zeros(n_samples)
+            for i in range(n_samples):
+                if np.random.random() < w1:
+                    samples[i] = np.random.normal(mu1, sigma)
+                else:
+                    samples[i] = np.random.normal(mu2, sigma)
+            samples = np.maximum(samples, 0)  # Ensure non-negative
+            
+            theoretical_mean = mean
+            theoretical_std = np.sqrt(w1 * (sigma**2 + (mu1 - mean)**2) + 
+                                     w2 * (sigma**2 + (mu2 - mean)**2))
+        
+        # Create histogram
+        fig_dist = go.Figure()
+        fig_dist.add_trace(go.Histogram(
+            x=samples,
+            nbinsx=30,
+            name="Simulated",
+            marker_color="#6c5ce7",
+            opacity=0.7,
+        ))
+        fig_dist.add_vline(x=theoretical_mean, line_dash="dash", line_color="#00b894",
+                          annotation_text=f"Mean: {theoretical_mean:.2f}",
+                          annotation_position="top right")
+        fig_dist.update_layout(
+            xaxis_title="Swaps per Vehicle per Day",
+            yaxis_title="Frequency",
+            height=280,
+            margin=dict(l=20, r=20, t=30, b=20),
+            showlegend=False,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(family="Inter", size=11, color="rgba(255,255,255,0.7)"),
+        )
+        st.plotly_chart(fig_dist, use_container_width=True)
+        
+        # Stats
+        st.markdown(f"""
+        <div style="font-family: 'Inter', sans-serif; font-size: 0.75rem; color: rgba(255,255,255,0.5); line-height: 1.6;">
+        <b>Distribution:</b> {d_dist.title()}<br>
+        <b>Mean:</b> {theoretical_mean:.3f} swaps/day<br>
+        <b>Std Dev:</b> {theoretical_std:.3f}<br>
+        <b>CoV:</b> {theoretical_std/theoretical_mean:.3f}
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col_temporal:
+        st.markdown("**Temporal Patterns (90 days)**")
+        
+        # Generate 90-day pattern
+        days = 90
+        day_nums = np.arange(days)
+        
+        # Base demand
+        daily_demand = np.full(days, base_swaps_per_day)
+        
+        # Apply weekend factor
+        is_weekend = (day_nums % 7 >= 5)  # Assuming day 0 is Monday
+        daily_demand[is_weekend] *= d_wknd
+        
+        # Apply seasonal pattern
+        if d_season > 0:
+            seasonal_factor = 1 + d_season * np.sin(2 * np.pi * day_nums / 365)
+            daily_demand *= seasonal_factor
+        
+        # Create time series plot
+        fig_temporal = go.Figure()
+        fig_temporal.add_trace(go.Scatter(
+            x=day_nums,
+            y=daily_demand,
+            mode='lines',
+            name='Expected Demand',
+            line=dict(color='#0984e3', width=2),
+            fill='tozeroy',
+            fillcolor='rgba(9,132,227,0.2)',
+        ))
+        
+        # Add weekend shading
+        for i in range(0, days, 7):
+            fig_temporal.add_vrect(
+                x0=i+5, x1=i+7,
+                fillcolor="rgba(255,255,255,0.03)",
+                layer="below",
+                line_width=0,
+            )
+        
+        fig_temporal.update_layout(
+            xaxis_title="Day",
+            yaxis_title="Swaps per Vehicle",
+            height=280,
+            margin=dict(l=20, r=20, t=30, b=20),
+            showlegend=False,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(family="Inter", size=11, color="rgba(255,255,255,0.7)"),
+        )
+        st.plotly_chart(fig_temporal, use_container_width=True)
+        
+        # Pattern summary
+        weekday_avg = daily_demand[~is_weekend].mean()
+        weekend_avg = daily_demand[is_weekend].mean()
+        overall_avg = daily_demand.mean()
+        
+        st.markdown(f"""
+        <div style="font-family: 'Inter', sans-serif; font-size: 0.75rem; color: rgba(255,255,255,0.5); line-height: 1.6;">
+        <b>Weekday avg:</b> {weekday_avg:.3f} swaps/day<br>
+        <b>Weekend avg:</b> {weekend_avg:.3f} swaps/day<br>
+        <b>Overall avg:</b> {overall_avg:.3f} swaps/day<br>
+        <b>Peak/trough ratio:</b> {daily_demand.max()/daily_demand.min():.2f}×
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Key insights
+    with st.expander("Understanding the demand model"):
+        st.markdown("""
+        **Distribution Types:**
+        - **Poisson**: Natural choice for count data (number of swaps). Variance equals mean. Good for modeling independent events.
+        - **Gamma**: More flexible, allows higher variance. Better for modeling aggregated demand or when demand has "memory" effects.
+        - **Bimodal**: Mixture of two Gaussian peaks. Ideal for capturing dual-peak patterns like:
+          - Morning/evening commute rushes
+          - Personal vs commercial user segments
+          - Different vehicle types with distinct usage patterns
+        
+        **For Gamma — Volatility (CoV):**
+        - Coefficient of Variation = σ/μ (standard deviation ÷ mean)
+        - 0.0–0.15: Low variability, predictable demand
+        - 0.15–0.3: Moderate variability, typical for urban mobility
+        - 0.3+: High variability, unpredictable demand patterns
+        
+        **For Bimodal — Parameters:**
+        - **Peak 1 weight**: Proportion of demand from first peak (e.g., 0.6 = 60% morning, 40% evening)
+        - **Peak separation**: Distance between peaks in units of mean demand (0.5 = peaks are 50% of mean apart)
+        - **Peak width**: Standard deviation of each peak (0.15 = each peak has σ = 15% of mean)
+        
+        **Temporal Patterns:**
+        - **Weekend factor**: Captures weekly patterns (e.g., lower commercial usage on weekends)
+        - **Seasonal amplitude**: Captures annual patterns (e.g., monsoon season, festivals, temperature effects)
+        
+        **Why this matters:**
+        - Higher volatility → need more buffer capacity (packs, docks)
+        - Weekend/seasonal patterns → optimize staffing and maintenance schedules
+        - Monte Carlo simulations use these distributions to generate realistic demand scenarios
+        """)
+    
+    st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# Pack Failure Model Preview (if enabled)
+# ---------------------------------------------------------------------------
+if show_pack_failure_preview and sim_engine == "stochastic":
+    st.markdown("---")
+    st.subheader("Pack Failure Model Preview")
+    st.caption("Exponential failure distribution (constant hazard rate)")
+    
+    # Parameters
+    mtbf_hrs = p_mtbf
+    mttr_hrs = p_mttr
+    
+    # Time range (in hours) - show 3x MTBF
+    t_max = mtbf_hrs * 3
+    t = np.linspace(0, t_max, 500)
+    
+    # Exponential distribution: λ = 1/MTBF
+    lam = 1.0 / mtbf_hrs
+    
+    # PDF: probability density function
+    pdf = lam * np.exp(-lam * t)
+    
+    # CDF: cumulative distribution (probability of failure by time t)
+    cdf = 1 - np.exp(-lam * t)
+    
+    # Reliability function (1 - CDF)
+    reliability = np.exp(-lam * t)
+    
+    # Hazard rate (constant for exponential)
+    hazard_rate = np.full_like(t, lam)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Failure Probability**")
+        fig_pdf = go.Figure()
+        fig_pdf.add_trace(go.Scatter(
+            x=t / 1000,  # Convert to thousands of hours
+            y=pdf * 1000,  # Scale for readability
+            mode='lines',
+            name='PDF',
+            line=dict(color='#e74c3c', width=2),
+            fill='tozeroy',
+            fillcolor='rgba(231,76,60,0.2)',
+        ))
+        fig_pdf.add_vline(x=mtbf_hrs / 1000, line_dash="dash", line_color="#00b894",
+                         annotation_text=f"MTBF: {mtbf_hrs/1000:.1f}k hrs",
+                         annotation_position="top right")
+        fig_pdf.update_layout(
+            xaxis_title="Time (k hours)",
+            yaxis_title="Probability Density (×10³)",
+            height=280,
+            margin=dict(l=20, r=20, t=30, b=20),
+            showlegend=False,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(family="Inter", size=11, color="rgba(255,255,255,0.7)"),
+        )
+        st.plotly_chart(fig_pdf, use_container_width=True)
+        
+        st.markdown(f"""
+        <div style="font-family: 'Inter', sans-serif; font-size: 0.75rem; color: rgba(255,255,255,0.5); line-height: 1.6;">
+        <b>MTBF:</b> {mtbf_hrs:,.0f} hours<br>
+        <b>MTTR:</b> {mttr_hrs:.1f} hours<br>
+        <b>Availability:</b> {100 * mtbf_hrs / (mtbf_hrs + mttr_hrs):.2f}%
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("**Reliability Over Time**")
+        fig_rel = go.Figure()
+        fig_rel.add_trace(go.Scatter(
+            x=t / 1000,
+            y=reliability * 100,
+            mode='lines',
+            name='Reliability',
+            line=dict(color='#00b894', width=2),
+            fill='tozeroy',
+            fillcolor='rgba(0,184,148,0.2)',
+        ))
+        # Add horizontal line at 50% reliability
+        fig_rel.add_hline(y=50, line_dash="dot", line_color="rgba(255,255,255,0.3)",
+                         annotation_text="50% survival",
+                         annotation_position="bottom right")
+        fig_rel.update_layout(
+            xaxis_title="Time (k hours)",
+            yaxis_title="Probability Still Working (%)",
+            height=280,
+            margin=dict(l=20, r=20, t=30, b=20),
+            showlegend=False,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(family="Inter", size=11, color="rgba(255,255,255,0.7)"),
+        )
+        st.plotly_chart(fig_rel, use_container_width=True)
+        
+        # Calculate median lifetime (50% survival)
+        median_life = -np.log(0.5) / lam
+        st.markdown(f"""
+        <div style="font-family: 'Inter', sans-serif; font-size: 0.75rem; color: rgba(255,255,255,0.5); line-height: 1.6;">
+        <b>Median lifetime:</b> {median_life:,.0f} hours<br>
+        <b>10% failure by:</b> {-np.log(0.9) / lam:,.0f} hours<br>
+        <b>50% failure by:</b> {median_life:,.0f} hours
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with st.expander("Understanding pack failures"):
+        st.markdown("""
+        **Exponential Distribution (Constant Hazard Rate):**
+        - Pack failures are modeled as **memoryless** events — the probability of failure in the next hour is constant, regardless of pack age
+        - This is appropriate for random failures: BMS faults, cell defects, connector damage, handling accidents
+        - **MTBF** (Mean Time Between Failures): average operating hours between failures across the fleet
+        - **MTTR** (Mean Time To Repair): average time to diagnose, swap, and repair a failed pack
+        - **Availability** = MTBF / (MTBF + MTTR): percentage of time packs are operational
+        
+        **Interpretation:**
+        - Higher MTBF = more reliable packs, fewer disruptions
+        - Lower MTTR = faster turnaround, less downtime
+        - This model assumes "sudden death" failures, not gradual degradation (which is captured separately by the SOH model)
+        """)
+    
+    st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# Charger Failure Model Preview (if enabled)
+# ---------------------------------------------------------------------------
+for idx, (show_charger_preview, charger_params) in enumerate(zip(charger_preview_flags, charger_preview_params)):
+    if show_charger_preview and sim_engine == "stochastic":
+        st.markdown("---")
+        st.subheader(f"Charger Failure Model Preview: {charger_params['name']}")
+        
+        dist_type = charger_params['distribution']
+        mtbf_hrs = charger_params['mtbf']
+        mttr_hrs = charger_params['mttr']
+        
+        if dist_type == "exponential":
+            st.caption("Exponential distribution (constant hazard rate)")
+        else:
+            beta = charger_params['weibull_shape']
+            if beta < 1:
+                st.caption(f"Weibull distribution (β = {beta:.2f}) — Infant mortality pattern")
+            elif beta > 1:
+                st.caption(f"Weibull distribution (β = {beta:.2f}) — Wear-out pattern")
+            else:
+                st.caption(f"Weibull distribution (β = {beta:.2f}) — Equivalent to exponential")
+        
+        # Time range (in hours)
+        t_max = mtbf_hrs * 3
+        t = np.linspace(0.01, t_max, 500)  # Start from 0.01 to avoid division by zero
+        
+        if dist_type == "exponential":
+            # Exponential: λ = 1/MTBF
+            lam = 1.0 / mtbf_hrs
+            pdf = lam * np.exp(-lam * t)
+            cdf = 1 - np.exp(-lam * t)
+            reliability = np.exp(-lam * t)
+            hazard_rate = np.full_like(t, lam)
+            median_life = -np.log(0.5) / lam
+        else:
+            # Weibull: need to adjust scale parameter to match desired MTBF
+            # MTBF = scale * Gamma(1 + 1/shape)
+            # scale = MTBF / Gamma(1 + 1/shape)
+            beta = charger_params['weibull_shape']
+            scale = mtbf_hrs / gamma_func(1 + 1/beta)
+            
+            # Weibull PDF, CDF, reliability, hazard
+            pdf = (beta / scale) * (t / scale) ** (beta - 1) * np.exp(-(t / scale) ** beta)
+            cdf = 1 - np.exp(-(t / scale) ** beta)
+            reliability = np.exp(-(t / scale) ** beta)
+            hazard_rate = (beta / scale) * (t / scale) ** (beta - 1)
+            median_life = scale * (np.log(2)) ** (1/beta)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Failure Probability**")
+            fig_pdf = go.Figure()
+            fig_pdf.add_trace(go.Scatter(
+                x=t / 1000,
+                y=pdf * 1000,
+                mode='lines',
+                name='PDF',
+                line=dict(color='#fdcb6e', width=2),
+                fill='tozeroy',
+                fillcolor='rgba(253,203,110,0.2)',
+            ))
+            fig_pdf.add_vline(x=mtbf_hrs / 1000, line_dash="dash", line_color="#00b894",
+                             annotation_text=f"MTBF: {mtbf_hrs/1000:.1f}k hrs",
+                             annotation_position="top right")
+            fig_pdf.update_layout(
+                xaxis_title="Time (k hours)",
+                yaxis_title="Probability Density (×10³)",
+                height=280,
+                margin=dict(l=20, r=20, t=30, b=20),
+                showlegend=False,
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(family="Inter", size=11, color="rgba(255,255,255,0.7)"),
+            )
+            st.plotly_chart(fig_pdf, use_container_width=True)
+            
+            st.markdown(f"""
+            <div style="font-family: 'Inter', sans-serif; font-size: 0.75rem; color: rgba(255,255,255,0.5); line-height: 1.6;">
+            <b>Distribution:</b> {dist_type.title()}<br>
+            <b>MTBF:</b> {mtbf_hrs:,.0f} hours<br>
+            <b>MTTR:</b> {mttr_hrs:.1f} hours<br>
+            <b>Availability:</b> {100 * mtbf_hrs / (mtbf_hrs + mttr_hrs):.2f}%
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown("**Hazard Rate Over Time**")
+            fig_hazard = go.Figure()
+            fig_hazard.add_trace(go.Scatter(
+                x=t / 1000,
+                y=hazard_rate * 1000,
+                mode='lines',
+                name='Hazard Rate',
+                line=dict(color='#fd79a8', width=2),
+                fill='tozeroy',
+                fillcolor='rgba(253,121,168,0.2)',
+            ))
+            fig_hazard.update_layout(
+                xaxis_title="Time (k hours)",
+                yaxis_title="Failure Rate (×10⁻³ per hour)",
+                height=280,
+                margin=dict(l=20, r=20, t=30, b=20),
+                showlegend=False,
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(family="Inter", size=11, color="rgba(255,255,255,0.7)"),
+            )
+            st.plotly_chart(fig_hazard, use_container_width=True)
+            
+            st.markdown(f"""
+            <div style="font-family: 'Inter', sans-serif; font-size: 0.75rem; color: rgba(255,255,255,0.5); line-height: 1.6;">
+            <b>Median lifetime:</b> {median_life:,.0f} hours<br>
+            <b>10% failure by:</b> {t[np.argmin(np.abs(cdf - 0.1))]:,.0f} hours<br>
+            <b>50% failure by:</b> {median_life:,.0f} hours
+            </div>
+            """, unsafe_allow_html=True)
+        
+        if dist_type == "weibull":
+            with st.expander("Understanding Weibull shape parameter (β)"):
+                st.markdown(f"""
+                **Weibull Shape (β = {charger_params['weibull_shape']:.2f}):**
+                
+                - **β < 1** (Infant Mortality): Failure rate **decreases** over time
+                  - Early defects and manufacturing issues get weeded out
+                  - Common in electronics, new equipment
+                  - Hazard rate is highest at t=0 and decays over time
+                
+                - **β = 1** (Constant Hazard): Equivalent to exponential distribution
+                  - Random, memoryless failures
+                  - Hazard rate is flat over time
+                
+                - **β > 1** (Wear-out): Failure rate **increases** over time
+                  - Mechanical wear, fatigue, aging effects dominate
+                  - Typical for mature equipment approaching end-of-life
+                  - Hazard rate accelerates as equipment ages
+                
+                **Your Configuration (β = {charger_params['weibull_shape']:.2f}):**
+                {"- Infant mortality pattern: expect more failures early, then stabilizing" if charger_params['weibull_shape'] < 1 else ""}
+                {"- Constant failure rate: random failures, no age dependence" if charger_params['weibull_shape'] == 1 else ""}
+                {"- Wear-out pattern: failures increase with age, consider proactive replacement" if charger_params['weibull_shape'] > 1 else ""}
+                """)
+        else:
+            with st.expander("Understanding exponential failures"):
+                st.markdown("""
+                **Exponential Distribution (Constant Hazard Rate):**
+                - Charger failures are **memoryless** — failure probability is constant regardless of age
+                - Appropriate for random failures: power supply faults, connector wear, software glitches
+                - **MTBF** (Mean Time Between Failures): average operating hours per charger between failures
+                - **MTTR** (Mean Time To Repair): average time to diagnose, repair, or replace a charger
+                - **Availability** = MTBF / (MTBF + MTTR): fraction of time chargers are operational
+                
+                **When to use exponential vs Weibull:**
+                - Use **exponential** for proven, mature technology with random failures
+                - Use **Weibull with β < 1** for new technology with early-life issues
+                - Use **Weibull with β > 1** for equipment with known wear-out patterns
+                """)
+        
+        st.markdown("---")
 
 if not (run_clicked or "results" in st.session_state):
     st.markdown("""
