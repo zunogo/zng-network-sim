@@ -1,0 +1,105 @@
+# Base case scenario — matches PRD §12.6 example values.
+
+vehicle:
+  name: "Heavy 2W"
+  packs_per_vehicle: 2
+  pack_capacity_kwh: 1.28
+  avg_daily_km: 100
+  energy_consumption_wh_per_km: 30
+  swap_time_minutes: 2.0
+  range_anxiety_buffer_pct: 0.20
+
+pack:
+  name: "1.28 kWh NMC"
+  nominal_capacity_kwh: 1.28
+  chemistry: "NMC"
+  unit_cost: 15000
+  cycle_life_to_retirement: 1200
+  cycle_degradation_rate_pct: 0.05
+  calendar_aging_rate_pct_per_month: 0.15
+  depth_of_discharge_pct: 0.80
+  retirement_soh_pct: 0.70
+  second_life_salvage_value: 3000
+  weight_kg: 6.5
+  aggressiveness_multiplier: 1.0
+  mtbf_hours: 50000
+  mttr_hours: 4
+  repair_cost_per_event: 2000
+  replacement_threshold: 3
+  full_replacement_cost: 15000
+  spare_packs_cost_per_station: 30000
+
+charger_variants:
+  - name: "Budget-1kW"
+    purchase_cost_per_slot: 8000
+    rated_power_w: 1000
+    charging_efficiency_pct: 0.90
+    efficiency_decay_pct_per_year: 0.005
+    mtbf_hours: 8000
+    mttr_hours: 24
+    repair_cost_per_event: 1500
+    replacement_threshold: 3
+    full_replacement_cost: 7500
+    spare_inventory_cost: 8000
+    expected_useful_life_years: 7
+
+  - name: "Premium-1kW"
+    purchase_cost_per_slot: 25000
+    rated_power_w: 1000
+    charging_efficiency_pct: 0.92
+    efficiency_decay_pct_per_year: 0.003
+    mtbf_hours: 40000
+    mttr_hours: 12
+    repair_cost_per_event: 2000
+    replacement_threshold: 4
+    full_replacement_cost: 20000
+    spare_inventory_cost: 25000
+    expected_useful_life_years: 10
+
+  - name: "Fast-3kW"
+    purchase_cost_per_slot: 35000
+    rated_power_w: 3000
+    charging_efficiency_pct: 0.88
+    efficiency_decay_pct_per_year: 0.008
+    mtbf_hours: 30000
+    mttr_hours: 18
+    repair_cost_per_event: 3000
+    replacement_threshold: 3
+    full_replacement_cost: 30000
+    spare_inventory_cost: 35000
+    expected_useful_life_years: 8
+
+station:
+  cabinet_cost: 50000
+  site_prep_cost: 30000
+  grid_connection_cost: 25000
+  software_cost: 100000
+  security_deposit: 20000
+  num_stations: 5
+  docks_per_station: 8
+  operating_hours_per_day: 18
+
+opex:
+  electricity_tariff_per_kwh: 8.0
+  auxiliary_power_per_month: 2000
+  rent_per_month_per_station: 15000
+  preventive_maintenance_per_month_per_station: 3000
+  corrective_maintenance_per_month_per_station: 1000
+  insurance_per_month_per_station: 2000
+  logistics_per_month_per_station: 5000
+  pack_handling_labor_per_swap: 2.0
+  overhead_per_month: 50000
+
+revenue:
+  price_per_swap: 40
+  initial_fleet_size: 200
+  monthly_fleet_additions: 50
+
+chaos:
+  sabotage_pct_per_month: 0.005
+  aggressiveness_index: 1.0
+  thermal_throttling_factor: 1.0
+
+simulation:
+  horizon_months: 60
+  discount_rate_annual: 0.12
