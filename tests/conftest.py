@@ -7,6 +7,8 @@ import pytest
 from zng_simulator.config import (
     ChaosConfig,
     ChargerVariant,
+    DemandConfig,
+    FinanceConfig,
     OpExConfig,
     PackSpec,
     RevenueConfig,
@@ -138,8 +140,40 @@ def chaos() -> ChaosConfig:
 
 
 @pytest.fixture
+def finance() -> FinanceConfig:
+    return FinanceConfig(
+        debt_pct_of_capex=0.70,
+        interest_rate_annual=0.12,
+        loan_tenor_months=60,
+        grace_period_months=6,
+        depreciation_method="straight_line",
+        asset_useful_life_months=60,
+        tax_rate=0.25,
+        terminal_value_method="salvage",
+        terminal_growth_rate=0.02,
+        dscr_covenant_threshold=1.20,
+    )
+
+
+@pytest.fixture
+def demand() -> DemandConfig:
+    return DemandConfig(
+        distribution="poisson",
+        volatility=0.15,
+        weekend_factor=0.6,
+        seasonal_amplitude=0.0,
+    )
+
+
+@pytest.fixture
 def sim_config() -> SimulationConfig:
-    return SimulationConfig(horizon_months=60)
+    return SimulationConfig(
+        horizon_months=60,
+        discount_rate_annual=0.12,
+        engine="static",
+        random_seed=None,
+        monte_carlo_runs=100,
+    )
 
 
 @pytest.fixture
@@ -152,6 +186,8 @@ def scenario(
     opex: OpExConfig,
     revenue: RevenueConfig,
     chaos: ChaosConfig,
+    demand: DemandConfig,
+    finance: FinanceConfig,
     sim_config: SimulationConfig,
 ) -> Scenario:
     return Scenario(
@@ -162,5 +198,7 @@ def scenario(
         opex=opex,
         revenue=revenue,
         chaos=chaos,
+        demand=demand,
+        finance=finance,
         simulation=sim_config,
     )

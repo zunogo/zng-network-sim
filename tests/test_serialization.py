@@ -12,8 +12,10 @@ from zng_simulator.config import Scenario, ChargerVariant
 from zng_simulator.engine.cashflow import run_simulation
 from zng_simulator.models.results import (
     ChargerTCOBreakdown,
+    CohortStatus,
     CostPerCycleWaterfall,
     DerivedParams,
+    MonteCarloSummary,
     MonthlySnapshot,
     PackTCOBreakdown,
     RunSummary,
@@ -212,3 +214,170 @@ def test_simulation_result_dict_round_trip(
     restored = SimulationResult.model_validate(as_dict)
     assert restored.summary.total_revenue == result.summary.total_revenue
     assert restored.cpc_waterfall.total == result.cpc_waterfall.total
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 2 result model round-trips
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_cohort_status_round_trip():
+    """CohortStatus → JSON → CohortStatus."""
+    original = CohortStatus(
+        cohort_id=0,
+        born_month=1,
+        pack_count=400,
+        current_soh=0.85,
+        cumulative_cycles=450,
+        is_retired=False,
+        retired_month=None,
+    )
+    json_str = original.model_dump_json()
+    restored = CohortStatus.model_validate_json(json_str)
+    assert restored == original
+
+    # Test retired cohort
+    retired = CohortStatus(
+        cohort_id=0,
+        born_month=1,
+        pack_count=400,
+        current_soh=0.69,
+        cumulative_cycles=600,
+        is_retired=True,
+        retired_month=30,
+    )
+    json_str2 = retired.model_dump_json()
+    restored2 = CohortStatus.model_validate_json(json_str2)
+    assert restored2 == retired
+    assert restored2.is_retired is True
+    assert restored2.retired_month == 30
+
+
+def test_monte_carlo_summary_round_trip():
+    """MonteCarloSummary → JSON → MonteCarloSummary."""
+    original = MonteCarloSummary(
+        num_runs=100,
+        ncf_p10=-500_000.0,
+        ncf_p50=200_000.0,
+        ncf_p90=800_000.0,
+        break_even_p10=24,
+        break_even_p50=18,
+        break_even_p90=14,
+        cpc_p10=42.0,
+        cpc_p50=48.0,
+        cpc_p90=55.0,
+        avg_packs_retired=120.5,
+        max_packs_retired=180,
+        avg_charger_failures=45.2,
+        avg_failure_to_serve=12.3,
+        max_failure_to_serve=35,
+    )
+    json_str = original.model_dump_json()
+    restored = MonteCarloSummary.model_validate_json(json_str)
+    assert restored == original
+
+
+def test_monte_carlo_summary_no_break_even():
+    """MonteCarloSummary with None break-even percentiles."""
+    original = MonteCarloSummary(
+        num_runs=50,
+        ncf_p10=-1_000_000.0,
+        ncf_p50=-500_000.0,
+        ncf_p90=-100_000.0,
+        break_even_p10=None,
+        break_even_p50=None,
+        break_even_p90=None,
+        cpc_p10=80.0,
+        cpc_p50=95.0,
+        cpc_p90=110.0,
+        avg_packs_retired=200.0,
+        max_packs_retired=300,
+        avg_charger_failures=80.0,
+        avg_failure_to_serve=50.0,
+        max_failure_to_serve=120,
+    )
+    json_str = original.model_dump_json()
+    restored = MonteCarloSummary.model_validate_json(json_str)
+    assert restored.break_even_p10 is None
+    assert restored.break_even_p50 is None
+    assert restored.break_even_p90 is None
+
+
+def test_monthly_snapshot_with_stochastic_fields():
+    """MonthlySnapshot with Phase 2 optional fields populated."""
+    cpc = CostPerCycleWaterfall(
+        battery=20.0, charger=4.2, electricity=11.38,
+        real_estate=4.92, maintenance=1.31, insurance=0.66,
+        sabotage=0.74, logistics=1.64, overhead=3.28, total=48.13,
+    )
+    original = MonthlySnapshot(
+        month=30,
+        fleet_size=1200,
+        swap_visits=35000,
+        total_cycles=70000,
+        revenue=1_400_000.0,
+        opex_total=800_000.0,
+        capex_this_month=7_200_000.0,  # Lumpy! Cohort retirement
+        net_cash_flow=-6_600_000.0,
+        cumulative_cash_flow=-2_000_000.0,
+        cost_per_cycle=cpc,
+        # Phase 2 fields
+        avg_soh=0.72,
+        packs_retired_this_month=400,
+        packs_replaced_this_month=400,
+        replacement_capex_this_month=6_000_000.0,
+        salvage_credit_this_month=1_200_000.0,
+        charger_failures_this_month=3,
+        failure_to_serve_count=5,
+        avg_wait_time_minutes=2.5,
+    )
+    json_str = original.model_dump_json()
+    restored = MonthlySnapshot.model_validate_json(json_str)
+    assert restored == original
+    assert restored.packs_retired_this_month == 400
+    assert restored.replacement_capex_this_month == 6_000_000.0
+
+
+def test_run_summary_with_stochastic_fields():
+    """RunSummary with Phase 2 optional fields populated."""
+    original = RunSummary(
+        charger_variant_name="Budget-1kW",
+        total_revenue=50_000_000.0,
+        total_opex=30_000_000.0,
+        total_capex=15_000_000.0,
+        total_net_cash_flow=5_000_000.0,
+        avg_cost_per_cycle=48.13,
+        break_even_month=22,
+        # Phase 2 fields
+        total_packs_retired=800,
+        total_charger_failures=45,
+        total_failure_to_serve=25,
+        mean_soh_at_end=0.88,
+        total_replacement_capex=12_000_000.0,
+        total_salvage_credit=2_400_000.0,
+    )
+    json_str = original.model_dump_json()
+    restored = RunSummary.model_validate_json(json_str)
+    assert restored == original
+    assert restored.total_packs_retired == 800
+
+
+def test_static_result_has_none_stochastic_fields(
+    scenario: Scenario, budget_charger: ChargerVariant,
+):
+    """Phase 1 static engine results should have None for all stochastic fields."""
+    result = run_simulation(scenario, budget_charger)
+    assert result.engine_type == "static"
+    assert result.cohort_history is None
+    assert result.monte_carlo is None
+
+    # Monthly snapshots should have None stochastic fields
+    for snap in result.months:
+        assert snap.avg_soh is None
+        assert snap.packs_retired_this_month is None
+        assert snap.charger_failures_this_month is None
+        assert snap.failure_to_serve_count is None
+
+    # Summary should have None stochastic fields
+    assert result.summary.total_packs_retired is None
+    assert result.summary.total_charger_failures is None
+    assert result.summary.mean_soh_at_end is None

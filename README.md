@@ -942,16 +942,245 @@ zng-network-simulator/
 - Cost per cycle now reflects **dynamic** degradation and failure rates
 
 ### Phase 3 — Financials (bankability + DCF decision-making)
-**Goal**: full DCF, funds flow, SLB metrics, **and** discounted charger comparison.
 
-**What gets built**: `finance/dcf.py`, `finance/dscr.py`. Existing modules untouched.
+**Goal**: full DCF, funds flow, SLB metrics, **and** discounted charger comparison. This is the phase that transforms the simulator from an operational tool into a **bankable financial model** — the kind of output that goes into an investor deck, a board memo, or a term-sheet negotiation.
 
-**Acceptance criteria**
-- Computes NPV/IRR from simulated cash flows
-- Computes **charger TCO in NPV terms** (§6.3) and ranks charger variants
-- Computes **discounted cost per cycle** across the project life
-- Computes DSCR and supports debt schedules
-- Includes asset residual / second-life value effects
+**Pre-requisites**: Phase 1 (static engine) + Phase 2 (stochastic engine, Monte Carlo, cohort degradation, charger reliability) are complete. Phase 3 layers financial logic on top of the existing `MonthlySnapshot` and `RunSummary` outputs — it does not modify the simulation engines.
+
+---
+
+#### Phase 3 Implementation Plan
+
+##### Step 3A — Config: Debt & Financial Inputs (`config/finance.py`)
+
+**New file** — Pydantic model for debt structure and financial assumptions.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `debt_pct_of_capex` | float | 0.70 | Portion of initial CapEx funded by debt (0–1) |
+| `interest_rate_annual` | float | 0.12 | Annual interest rate on debt |
+| `loan_tenor_months` | int | 60 | Loan repayment period |
+| `grace_period_months` | int | 6 | Interest-only period before principal repayment starts |
+| `depreciation_method` | Literal["straight_line", "wdv"] | "straight_line" | Depreciation method for assets |
+| `asset_useful_life_months` | int | 60 | Accounting useful life of battery+charger assets |
+| `tax_rate` | float | 0.25 | Corporate tax rate (for after-tax DCF) |
+| `terminal_value_method` | Literal["salvage", "gordon_growth", "none"] | "salvage" | How to value the business at horizon end |
+| `terminal_growth_rate` | float | 0.02 | For Gordon growth model (ignored if method != "gordon_growth") |
+
+Also add `finance: FinanceConfig = Field(default_factory=FinanceConfig)` to `Scenario`.
+
+**Deliverables**: `config/finance.py`, updated `config/scenario.py`, sidebar UI for debt inputs, validation tests.
+
+---
+
+##### Step 3B — Core DCF Engine (`finance/dcf.py`)
+
+**New module** — takes monthly cash flows from any engine run and applies time-value-of-money.
+
+**Functions**:
+
+| Function | Input | Output | Logic |
+|---|---|---|---|
+| `compute_npv(cash_flows, rate)` | list[float], annual discount rate | float | Standard NPV: Σ CF_t / (1+r)^t |
+| `compute_irr(cash_flows)` | list[float] | float \| None | Newton-Raphson or bisection search for rate where NPV=0. None if no real root. |
+| `compute_discounted_payback(cash_flows, rate)` | list[float], annual rate | int \| None | First month where cumulative discounted CF ≥ 0 |
+| `compute_terminal_value(config, last_year_ncf, total_salvage)` | FinanceConfig, float, float | float | Salvage method: sum of battery 2nd-life + charger residual. Gordon: NCF × (1+g) / (r−g). |
+| `build_dcf_table(months, finance_cfg)` | list[MonthlySnapshot], FinanceConfig | DCFResult | Full month-by-month DCF table with discount factors, PV of each CF, cumulative PV, plus NPV/IRR/payback. |
+
+**New result model** — `DCFResult(BaseModel)`:
+- `npv: float` — Net Present Value
+- `irr: float | None` — Internal Rate of Return
+- `discounted_payback_month: int | None`
+- `terminal_value: float`
+- `monthly_dcf: list[MonthlyDCFRow]` — per-month: discount_factor, pv_revenue, pv_opex, pv_capex, pv_net_cf, cumulative_pv
+
+**Tests**: Hand-calculated NPV/IRR for known cash flow streams, edge cases (all-negative CF → no IRR, zero discount rate = undiscounted sum).
+
+---
+
+##### Step 3C — Charger TCO in NPV Terms (`finance/charger_npv.py`)
+
+**New module** — re-computes charger economics with discounting.
+
+Current `charger_tco.py` uses undiscounted expected-value math. Phase 3 overlays discounting:
+
+| Metric | Formula |
+|---|---|
+| **PV of repairs** | Σ repair_cost / (1+r)^t_i, with failures distributed uniformly across horizon |
+| **PV of replacements** | Σ replacement_cost / (1+r)^t_j |
+| **PV of lost revenue** | Σ downtime_revenue_loss / (1+r)^t_k |
+| **NPV of charger TCO** | CapEx_0 + PV(repairs) + PV(replacements) + PV(lost_revenue) + PV(spare) − PV(salvage) |
+| **Discounted CPC** | NPV_TCO / Σ (cycles_t / (1+r)^t) — PV-weighted cost per cycle |
+
+**Discounted CPC trajectory**: month-by-month running PV-CPC that shows how the discounted unit economics evolve as degradation, failures, and fleet growth compound.
+
+**Charger NPV comparison table**: ranks variants by NPV of full-network cash flows (not just charger TCO).
+
+**Sensitivity matrix** (§7.3): vary MTBF ±20%, pack cost ±15%, electricity ±10% — show how NPV ranking changes. Stored as a dict[param_name, list[SensitivityPoint]].
+
+**New result models**:
+- `ChargerNPVComparison` — per-variant: npv_tco, discounted_cpc, npv_of_network, ranking
+- `DiscountedCPCTrajectory` — list of (month, cumulative_discounted_cpc)
+
+**Tests**: Verify NPV of charger TCO < undiscounted TCO (discount rate > 0), verify discounted CPC converges to a stable value.
+
+---
+
+##### Step 3D — Debt Schedule & DSCR (`finance/dscr.py`)
+
+**New module** — models the debt side of the capital structure.
+
+**Functions**:
+
+| Function | Output |
+|---|---|
+| `build_debt_schedule(capex, finance_cfg)` | `DebtSchedule` — month-by-month: principal, interest, total payment, outstanding balance |
+| `compute_dscr(months, debt_schedule)` | `DSCRResult` — monthly DSCR + average DSCR + min DSCR + covenant breach months |
+
+**Debt schedule logic**:
+1. `loan_amount = total_initial_capex × debt_pct_of_capex`
+2. During grace period: interest-only payments (`loan_amount × monthly_rate`)
+3. After grace period: equal monthly installment (EMI) amortization
+4. EMI = `P × r × (1+r)^n / ((1+r)^n − 1)` where n = tenor − grace
+
+**DSCR**:
+- `DSCR_m = NOI_m / Debt_Service_m`
+- `NOI_m = Revenue_m − OpEx_m` (operating income before CapEx and debt)
+- Flag months where DSCR < 1.2 (typical SLB covenant threshold)
+
+**SLB feasibility indicators**:
+- Average DSCR over horizon
+- Minimum DSCR and its month
+- Months in covenant breach (DSCR < threshold)
+- Asset cover ratio = (remaining battery value + charger value) / outstanding loan
+
+**New result models**:
+- `DebtScheduleRow` — month, opening_balance, interest, principal, emi, closing_balance
+- `DebtSchedule` — list[DebtScheduleRow] + total_interest_paid
+- `DSCRResult` — monthly_dscr: list[float], avg_dscr, min_dscr, min_dscr_month, breach_months: list[int], asset_cover_ratio
+
+**Tests**: Verify EMI matches standard finance formula, verify DSCR = infinity when debt = 0, verify breach detection.
+
+---
+
+##### Step 3E — Financial Statements (`finance/statements.py`)
+
+**New module** — generates investor-grade monthly financial statements.
+
+| Statement | Rows |
+|---|---|
+| **P&L** | Revenue, (−) Electricity, (−) Station OpEx, (−) Labor, (−) Overhead, (−) Sabotage = **EBITDA**, (−) Depreciation = **EBIT**, (−) Interest = **EBT**, (−) Tax = **Net Income** |
+| **Cash Flow Statement** | Operating CF (revenue − cash OpEx), Investing CF (−CapEx − pack replacements), Financing CF (debt drawdown − repayments), **Net CF**, Cumulative CF |
+| **Balance Sheet** (simplified) | Assets: Gross assets − accumulated depreciation + cash. Liabilities: outstanding loan. Equity: retained earnings. |
+
+**Depreciation**:
+- Straight-line: `(asset_cost − salvage) / useful_life_months` per month
+- WDV (Written Down Value): `rate × book_value` per year, spread monthly
+
+**New result models**:
+- `MonthlyPnL` — revenue, cogs (electricity + labor), gross_profit, station_opex, ebitda, depreciation, ebit, interest, ebt, tax, net_income
+- `MonthlyCashFlowStatement` — operating_cf, investing_cf, financing_cf, net_cf, cumulative_cf
+- `FinancialStatements` — pnl: list[MonthlyPnL], cashflow: list[MonthlyCashFlowStatement]
+
+**Tests**: Verify EBITDA = Revenue − OpEx (no depreciation), verify Net CF = Operating + Investing + Financing.
+
+---
+
+##### Step 3F — Sensitivity / Tornado Analysis (`finance/sensitivity.py`)
+
+**New module** — automated parameter sweeps for investor-grade what-if analysis.
+
+**Logic**:
+1. Define sweep parameters: `[(param_path, low_pct, high_pct)]` e.g. `[("pack.unit_cost", -0.15, +0.15), ("charger.mtbf_hours", -0.20, +0.20)]`
+2. For each param, run the full engine at low and high values
+3. Record `ΔNPV`, `ΔIRR`, `ΔCPC` at each extreme
+4. Sort by |ΔNPV| descending → tornado chart data
+
+**Output**: `SensitivityResult` — list of `TornadoBar(param_name, base_value, low_value, high_value, npv_at_low, npv_at_high, delta_npv)`, sorted by impact.
+
+**Default sweep set** (user can customize):
+- `pack.unit_cost` ± 15%
+- `charger.mtbf_hours` ± 20%
+- `opex.electricity_tariff_per_kwh` ± 10%
+- `revenue.price_per_swap` ± 10%
+- `pack.cycle_degradation_rate_pct` ± 20%
+- `revenue.initial_fleet_size` ± 25%
+
+**Tests**: Verify that increasing revenue increases NPV (sanity), verify symmetry check.
+
+---
+
+##### Step 3G — Dashboard Integration
+
+**Updated `dashboard/app.py`** — new sections added after existing Phase 2 sections:
+
+| Section | Content |
+|---|---|
+| **NPV & IRR** | Hero cards: NPV, IRR, discounted payback. Monthly DCF table (expandable). Terminal value breakdown. |
+| **Discounted CPC** | Line chart: nominal CPC vs. discounted CPC over time. Per-charger variant if multiple. |
+| **Charger NPV Comparison** | Table ranking chargers by NPV (replaces/augments the undiscounted Phase 1 comparison). Sensitivity matrix below. |
+| **Debt & DSCR** | Debt schedule table. DSCR timeline chart with covenant threshold line. SLB feasibility card. |
+| **P&L Summary** | Monthly P&L table. EBITDA margin trend. |
+| **Sensitivity** | Tornado chart (horizontal bar chart sorted by NPV impact). |
+
+All sections follow the "Show the Math" principle — formulas in expanders.
+
+Finance sidebar inputs: debt %, interest rate, tenor, grace period, depreciation method, tax rate.
+
+---
+
+#### Phase 3 Dependency Graph
+
+```
+Step 3A (config)
+  ├── Step 3B (DCF engine) ──────┐
+  ├── Step 3C (charger NPV) ─────┼── Step 3G (dashboard)
+  ├── Step 3D (debt/DSCR) ───────┤
+  ├── Step 3E (statements) ──────┤
+  └── Step 3F (sensitivity) ─────┘
+```
+
+Steps 3B–3F can be built in **parallel** after 3A. Step 3G integrates them all into the dashboard.
+
+---
+
+#### Phase 3 File Changes Summary
+
+| Action | File | Description |
+|---|---|---|
+| **New** | `src/zng_simulator/config/finance.py` | FinanceConfig Pydantic model |
+| **Edit** | `src/zng_simulator/config/scenario.py` | Add `finance: FinanceConfig` field |
+| **Edit** | `src/zng_simulator/config/__init__.py` | Export FinanceConfig |
+| **New** | `src/zng_simulator/finance/__init__.py` | Package init |
+| **New** | `src/zng_simulator/finance/dcf.py` | NPV, IRR, terminal value, DCF table |
+| **New** | `src/zng_simulator/finance/charger_npv.py` | Discounted charger TCO, NPV comparison |
+| **New** | `src/zng_simulator/finance/dscr.py` | Debt schedule, DSCR, SLB metrics |
+| **New** | `src/zng_simulator/finance/statements.py` | P&L, Cash Flow Statement, Balance Sheet |
+| **New** | `src/zng_simulator/finance/sensitivity.py` | Parameter sweep, tornado data |
+| **Edit** | `src/zng_simulator/models/results.py` | Add DCFResult, DSCRResult, etc. |
+| **Edit** | `src/zng_simulator/dashboard/app.py` | New Phase 3 sections |
+| **Edit** | `scenarios/base_case.yaml` | Add finance section |
+| **New** | `tests/test_dcf.py` | DCF unit tests |
+| **New** | `tests/test_dscr.py` | DSCR unit tests |
+| **New** | `tests/test_charger_npv.py` | Charger NPV tests |
+| **New** | `tests/test_statements.py` | Financial statement tests |
+| **New** | `tests/test_sensitivity.py` | Sensitivity engine tests |
+
+---
+
+#### Phase 3 Acceptance Criteria (updated)
+
+1. ✅ Computes **NPV and IRR** from simulated cash flows (static or stochastic)
+2. ✅ Computes **charger TCO in NPV terms** (§6.3) and ranks charger variants by discounted TCO
+3. ✅ Computes **discounted cost per cycle** across the project life — month-by-month trajectory
+4. ✅ Computes **DSCR** with configurable debt schedule (amount, rate, tenor, grace period)
+5. ✅ Computes **SLB feasibility** indicators (avg DSCR, min DSCR, covenant breach months, asset cover)
+6. ✅ Includes **terminal value** from battery second-life salvage + charger residual
+7. ✅ Produces **P&L, Cash Flow Statement** with operating/investing/financing separation
+8. ✅ **Sensitivity / tornado** analysis for key parameters → NPV impact ranking
+9. ✅ Dashboard shows all financial outputs with "Show the Math" formulas
+10. ✅ All finance functions have unit tests with hand-verified expected values
+11. ✅ Monte Carlo P10/P50/P90 carries through to NPV/IRR confidence intervals
 
 ### Phase 4 — Intelligence (optimization + field sync)
 **Goal**: pilot sizing optimization, field-data parameter tuning, and auto-recommendations.

@@ -42,6 +42,8 @@ charger_variants:
     full_replacement_cost: 7500
     spare_inventory_cost: 8000
     expected_useful_life_years: 7
+    failure_distribution: "exponential"
+    weibull_shape: 1.0
 
   - name: "Premium-1kW"
     purchase_cost_per_slot: 25000
@@ -55,6 +57,8 @@ charger_variants:
     full_replacement_cost: 20000
     spare_inventory_cost: 25000
     expected_useful_life_years: 10
+    failure_distribution: "weibull"
+    weibull_shape: 1.5  # mild wear-out pattern
 
   - name: "Fast-3kW"
     purchase_cost_per_slot: 35000
@@ -68,6 +72,8 @@ charger_variants:
     full_replacement_cost: 30000
     spare_inventory_cost: 35000
     expected_useful_life_years: 8
+    failure_distribution: "exponential"
+    weibull_shape: 1.0
 
 station:
   cabinet_cost: 50000
@@ -92,14 +98,36 @@ opex:
 
 revenue:
   price_per_swap: 40
-  initial_fleet_size: 200
-  monthly_fleet_additions: 50
+  initial_fleet_size: 750
+  monthly_fleet_additions: 0
 
 chaos:
   sabotage_pct_per_month: 0.005
   aggressiveness_index: 1.0
   thermal_throttling_factor: 1.0
 
+demand:
+  distribution: "poisson"
+  volatility: 0.15
+  weekend_factor: 0.6
+  seasonal_amplitude: 0.0
+
+finance:
+  debt_pct_of_capex: 0.70
+  interest_rate_annual: 0.12
+  loan_tenor_months: 60
+  grace_period_months: 6
+  depreciation_method: "straight_line"
+  asset_useful_life_months: 60
+  wdv_rate_annual: 0.25
+  tax_rate: 0.25
+  terminal_value_method: "salvage"
+  terminal_growth_rate: 0.02
+  dscr_covenant_threshold: 1.20
+
 simulation:
   horizon_months: 60
   discount_rate_annual: 0.12
+  engine: "static"           # "static" (Phase 1) or "stochastic" (Phase 2)
+  # random_seed: 42          # Uncomment for reproducible stochastic runs
+  monte_carlo_runs: 100

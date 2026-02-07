@@ -17,6 +17,7 @@ from zng_simulator.config import (
     OpExConfig,
     RevenueConfig,
     ChaosConfig,
+    DemandConfig,
     SimulationConfig,
     Scenario,
 )
@@ -312,7 +313,59 @@ class TestChaosValidation:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SimulationConfig
+# DemandConfig (Phase 2)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestDemandValidation:
+    """DemandConfig field constraints."""
+
+    def test_defaults_are_valid(self):
+        d = DemandConfig()
+        assert d.distribution in ("poisson", "gamma")
+        assert d.volatility >= 0
+
+    def test_invalid_distribution_rejected(self):
+        with pytest.raises(ValidationError):
+            DemandConfig(distribution="uniform")
+
+    def test_negative_volatility_rejected(self):
+        with pytest.raises(ValidationError):
+            DemandConfig(volatility=-0.1)
+
+    def test_volatility_above_max_rejected(self):
+        with pytest.raises(ValidationError):
+            DemandConfig(volatility=2.5)  # le=2.0
+
+    def test_zero_volatility_allowed(self):
+        """Zero volatility = deterministic demand (ge=0)."""
+        d = DemandConfig(volatility=0.0)
+        assert d.volatility == 0.0
+
+    def test_negative_weekend_factor_rejected(self):
+        with pytest.raises(ValidationError):
+            DemandConfig(weekend_factor=-0.1)
+
+    def test_weekend_factor_above_max_rejected(self):
+        with pytest.raises(ValidationError):
+            DemandConfig(weekend_factor=2.5)
+
+    def test_negative_seasonal_amplitude_rejected(self):
+        with pytest.raises(ValidationError):
+            DemandConfig(seasonal_amplitude=-0.1)
+
+    def test_seasonal_amplitude_above_max_rejected(self):
+        with pytest.raises(ValidationError):
+            DemandConfig(seasonal_amplitude=1.5)
+
+    def test_gamma_with_high_volatility(self):
+        """Gamma distribution with high CoV is valid."""
+        d = DemandConfig(distribution="gamma", volatility=1.5)
+        assert d.distribution == "gamma"
+        assert d.volatility == 1.5
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SimulationConfig (extended for Phase 2)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestSimulationValidation:
@@ -321,6 +374,8 @@ class TestSimulationValidation:
     def test_defaults_are_valid(self):
         s = SimulationConfig()
         assert s.horizon_months >= 1
+        assert s.engine == "static"
+        assert s.monte_carlo_runs >= 1
 
     def test_zero_horizon_rejected(self):
         with pytest.raises(ValidationError):
@@ -329,6 +384,69 @@ class TestSimulationValidation:
     def test_negative_discount_rate_rejected(self):
         with pytest.raises(ValidationError):
             SimulationConfig(discount_rate_annual=-0.1)
+
+    def test_invalid_engine_rejected(self):
+        with pytest.raises(ValidationError):
+            SimulationConfig(engine="montecarlo")
+
+    def test_stochastic_engine_accepted(self):
+        s = SimulationConfig(engine="stochastic")
+        assert s.engine == "stochastic"
+
+    def test_zero_mc_runs_rejected(self):
+        with pytest.raises(ValidationError):
+            SimulationConfig(monte_carlo_runs=0)
+
+    def test_mc_runs_above_max_rejected(self):
+        with pytest.raises(ValidationError):
+            SimulationConfig(monte_carlo_runs=10_001)  # le=10_000
+
+    def test_random_seed_none_allowed(self):
+        s = SimulationConfig(random_seed=None)
+        assert s.random_seed is None
+
+    def test_random_seed_integer_allowed(self):
+        s = SimulationConfig(random_seed=42)
+        assert s.random_seed == 42
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ChargerVariant (extended for Phase 2)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestChargerPhase2Validation:
+    """Phase 2 extensions on ChargerVariant."""
+
+    def test_default_failure_distribution(self):
+        c = ChargerVariant()
+        assert c.failure_distribution == "exponential"
+        assert c.weibull_shape == 1.0
+
+    def test_invalid_distribution_rejected(self):
+        with pytest.raises(ValidationError):
+            ChargerVariant(failure_distribution="normal")
+
+    def test_weibull_accepted(self):
+        c = ChargerVariant(failure_distribution="weibull", weibull_shape=1.5)
+        assert c.failure_distribution == "weibull"
+
+    def test_zero_weibull_shape_rejected(self):
+        with pytest.raises(ValidationError):
+            ChargerVariant(weibull_shape=0)  # gt=0
+
+    def test_negative_weibull_shape_rejected(self):
+        with pytest.raises(ValidationError):
+            ChargerVariant(weibull_shape=-1.0)
+
+    def test_infant_mortality_shape(self):
+        """β < 1 = infant mortality — valid."""
+        c = ChargerVariant(failure_distribution="weibull", weibull_shape=0.5)
+        assert c.weibull_shape == 0.5
+
+    def test_strong_wearout_shape(self):
+        """β > 1 = wear-out — valid."""
+        c = ChargerVariant(failure_distribution="weibull", weibull_shape=3.0)
+        assert c.weibull_shape == 3.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -346,3 +464,15 @@ class TestScenarioValidation:
         """Invalid nested config should fail Scenario creation."""
         with pytest.raises(ValidationError):
             Scenario(vehicle=VehicleConfig(packs_per_vehicle=0))
+
+    def test_scenario_includes_demand(self):
+        """Scenario now includes demand config."""
+        s = Scenario()
+        assert s.demand is not None
+        assert s.demand.distribution in ("poisson", "gamma")
+
+    def test_scenario_stochastic_engine(self):
+        """Scenario can be configured for stochastic engine."""
+        s = Scenario(simulation=SimulationConfig(engine="stochastic", monte_carlo_runs=500))
+        assert s.simulation.engine == "stochastic"
+        assert s.simulation.monte_carlo_runs == 500

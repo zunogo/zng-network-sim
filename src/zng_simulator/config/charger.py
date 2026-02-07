@@ -1,5 +1,7 @@
 """Charger variant — §5.3.  Multiple allowed per scenario for comparison."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -26,3 +28,21 @@ class ChargerVariant(BaseModel):
     full_replacement_cost: float = Field(default=9_500.0, ge=0, description="Cost of full unit swap (₹)")
     spare_inventory_cost: float = Field(default=10_000.0, ge=0, description="Capital tied up in spares (₹)")
     expected_useful_life_years: float = Field(default=4.0, gt=0, description="Calendar life (years)")
+
+    # --- Phase 2: stochastic failure model ---
+    failure_distribution: Literal["exponential", "weibull"] = Field(
+        default="exponential",
+        description="Failure time distribution for stochastic simulation. "
+                    "'exponential' = constant hazard rate (memoryless, standard MTBF). "
+                    "'weibull' = shape-dependent hazard (β<1: infant mortality, "
+                    "β=1: exponential, β>1: wear-out).",
+    )
+    weibull_shape: float = Field(
+        default=1.0,
+        gt=0,
+        description="Weibull shape parameter (β). Only used when "
+                    "failure_distribution='weibull'. "
+                    "β=1.0 → exponential (constant hazard). "
+                    "β=1.5 → mild wear-out. β=2.0 → strong wear-out. "
+                    "β=0.5 → infant mortality.",
+    )

@@ -11,5 +11,5 @@ class RevenueConfig(BaseModel):
         description="Gross price per swap VISIT (per vehicle, not per pack). "
                     "A 2-pack vehicle pays this once per visit.",
     )
-    initial_fleet_size: int = Field(default=200, ge=1, description="Vehicles at month 1")
+    initial_fleet_size: int = Field(default=750, ge=1, description="Vehicles at month 1")
     monthly_fleet_additions: int = Field(default=0, ge=0, description="New vehicles added each month")
