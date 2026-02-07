@@ -43,6 +43,10 @@
   - [12.6 UI specification (Phase 1)](#126-ui-specification-phase-1)
   - [12.7 Project layout](#127-project-layout-phase-1--what-actually-gets-built)
 - [13. Phased roadmap & acceptance criteria](#13-phased-roadmap--acceptance-criteria)
+  - [13.1 Field readiness principles (what makes it useful on the ground)](#131-field-readiness-principles-what-makes-it-useful-on-the-ground)
+  - [13.2 Falsifiability & model validation (non-negotiable for bankability)](#132-falsifiability--model-validation-non-negotiable-for-bankability)
+  - [13.3 Phase 5 — Field readiness (instrumentation + backtesting + ops loop)](#phase-5--field-readiness-instrumentation--backtesting--ops-loop)
+  - [13.4 Phase 6 — Bayesian digital twin (sequential calibration + drift + posterior reporting)](#phase-6--bayesian-digital-twin-sequential-calibration--drift--posterior-reporting)
 
 ---
 
@@ -471,6 +475,9 @@ Phase 1 has **zero** heavy dependencies — no numpy, scipy, pandas. Pure Python
 2. **Contracts first, extend never rewrite** — all Pydantic input models and result types are defined in Phase 1 with their full schema. Later phases populate more fields but never change the shape.
 3. **Engine is a pure function** — `Scenario` in → `SimulationResult` out. No side effects, no state. Dashboard is a thin shell.
 4. **One run = one charger** — the engine runs once per charger variant. Charger comparison is achieved by collecting results and displaying them side by side.
+5. **Falsifiable by design** — the simulator must make predictions that can be wrong, and must quantify uncertainty. Every major subsystem should publish (a) a forecast, (b) an error bar, and (c) a testable statement that field data can confirm or refute.
+6. **Calibration beats complexity** — a simpler model that is calibrated and backtested is more bankable than a complex model that only “looks realistic.” Treat backtesting, interval coverage, and drift detection as first-class features.
+7. **Separate process vs. observation** — the operational engine is the *process model*; telemetry and logs are the *measurement model*. A “digital twin” requires both.
 
 ### 12.3 Phase 1 scope boundary
 
@@ -1193,3 +1200,112 @@ Steps 3B–3F can be built in **parallel** after 3A. Step 3G integrates them all
 - Variance reports: projected vs actual for degradation and MTBF
 - Model parameters auto-tuned from historical data
 - System flags when field data changes a charger recommendation
+
+---
+
+### 13.1 Field readiness principles (what makes it useful on the ground)
+
+The simulator becomes truly useful in-field when it stops being “a sophisticated what-if calculator” and becomes a **decision system that is continuously checked against reality**.
+
+**Brutal reality check (opinionated)**:
+- A simulator that can explain anything after the fact is not “bankable.” It’s a narrative generator.
+- Underwriting-grade usefulness comes from **calibration discipline**: explicit forecasts, uncertainty bounds, and a repeatable backtesting loop.
+- Field realities (missing logs, biased telemetry, maintenance constraints, payment leakage, station outages) will break clean models. Build those failure modes into the product lifecycle, not as afterthoughts.
+
+**Non-negotiables for field usefulness**:
+- **Data contracts first**: define schemas for swap logs, charger failure logs, pack telemetry, station availability. Validate at ingestion (reject/flag bad data).
+- **Version everything**: scenario inputs, model version, parameter priors, tuned parameters, and outputs must be persisted and reproducible (audit trail).
+- **Operational feedback loop**: every run produces actionable deltas: “what changed,” “why,” and “what to do next” (spares, staffing, replacement planning, charger vendor choice).
+- **Segment reality**: demand, failures, and MTTR vary by station/region/crew/vendor batch. If you model only network averages, you will underprice risk.
+- **Cost realism**: include what ops actually pays (downtime-induced SLA penalties, spare stockouts, technician dispatch constraints, grid downtime, collections leakage).
+
+---
+
+### 13.2 Falsifiability & model validation (non-negotiable for bankability)
+
+To be defensible to investors/banks, the simulator must be **falsifiable**. That means: the model must make forward predictions that can be wrong, and you must measure how wrong it was.
+
+**Falsifiability factors (design checklist)**:
+- **Pre-registered forecast targets**: define what you predict for month \(t+1\), \(t+3\), \(t+6\) before seeing data (e.g., swaps/day, failures/month, MTTR distribution, stockout rate, revenue collected).
+- **Holdout / walk-forward backtesting**: fit/tune on months 1..t and score predictions on \(t+1\). Repeat (rolling).
+- **Proper scoring rules**: report log score / CRPS (not just “% error”) so uncertainty is scored, not ignored.
+- **Interval coverage**: if you say “P90,” then actuals should fall inside your 90% band ~90% of the time (calibration curve).
+- **Error decomposition**: split forecast error into demand vs downtime vs inventory vs data-quality gaps. If you can’t attribute error, you can’t improve the model.
+- **Identifiability tests**: document which datasets distinguish competing explanations (e.g., low served swaps due to low demand vs charger downtime vs pack stockout vs revenue leakage).
+- **Ablations**: show what happens when you remove a module (seasonality, Weibull wear-out, sabotage). If removing a module doesn’t change predictions, it’s probably not pulling its weight.
+- **Changepoint detection**: when reality shifts (vendor batch change, staffing changes, tariff changes), the model must detect drift and widen uncertainty rather than “silently being wrong.”
+- **Invariants & sanity checks**: enforce physical/operational constraints (e.g., cannot serve more swaps than dock throughput; pack count conservation; downtime reduces capacity).
+
+**Outputs required for bankability** (beyond NPV P10/P50/P90):
+- Posterior/estimated distributions for key latent drivers (demand intensity, MTBF/MTTR, sabotage/leakage rates) with credible intervals.
+- Calibration + backtesting report: coverage plots, rolling forecast error, drift alerts, and “what we changed” audit.
+
+---
+
+### Phase 5 — Field readiness (instrumentation + backtesting + ops loop)
+
+**Goal**: make the simulator operationally deployable and continuously testable with real station data.
+
+**What gets built**
+- **Data ingestion for operations reality**:
+  - Swap/service logs: served swaps, attempted swaps, wait times, “failure-to-serve” events, station open/close windows.
+  - Station constraints: operating hours, grid downtime, transformer/power caps, energy tariffs by time-of-use.
+  - Maintenance ops: technician roster coverage, part stockouts, dispatch times (drives MTTR).
+  - Revenue reality: collections, payment lag, bad debt, refunds, discounts (revenue ≠ billed ≠ collected).
+- **Run registry & audit trail**:
+  - Persist `Scenario`, model version, tuning inputs, tuned params, and results.
+  - Reproduce any past run exactly (seed + parameter snapshot).
+- **Backtesting harness**:
+  - Rolling (walk-forward) evaluation for demand, failures, and cashflow.
+  - Calibration reporting for predictive intervals.
+- **Decision artifacts** (outputs that ops can act on):
+  - Spare policy recommendations (spares vs downtime trade-off).
+  - Preventive maintenance schedule based on hazard patterns (especially Weibull wear-out).
+  - Station-level “hotspot” dashboards (which station is drifting and why).
+
+**Acceptance criteria**
+- Given 3+ months of field data, the system can run a rolling backtest and produce:
+  - next-month forecast distributions (not point estimates) for demand and failures,
+  - calibration metrics (coverage + scoring rules),
+  - a drift alert when parameters shift materially,
+  - a reproducible report that can be shared with an investor/bank as “model governance.”
+
+---
+
+### Phase 6 — Bayesian digital twin (sequential calibration + drift + posterior reporting)
+
+**Goal**: convert the simulator into a Bayesian twin that continuously updates beliefs about the true state of the network as new data arrives, and exposes uncertainty in a principled way.
+
+**Core idea**
+- **Process model**: your current simulation (demand, degradation, failures) defines how the system evolves.
+- **Observation model**: defines how logs/telemetry arise from the hidden true state (including noise, missingness, bias).
+- **Filtering**: sequentially update \(p(x_t, \\theta \\mid y_{1:t})\) as data arrives.
+
+**What gets built (minimum viable Bayesian twin)**
+- **Explicit latent state definition** \(x_t\):
+  - demand intensity by station/segment (bimodal/seasonal),
+  - charger hazard parameters (exponential/Weibull) by station + vendor batch,
+  - pack failure intensity and degradation multipliers (usage/temperature/aggressiveness),
+  - operational capacity (effective docks available) and MTTR drivers,
+  - leakage/sabotage rates (time-varying).
+- **Measurement models** \(p(y_t \\mid x_t)\):
+  - demand as count likelihood (Poisson/NegBin; mixture for bimodality),
+  - failures as renewal/survival likelihood (Weibull/exponential),
+  - telemetry as noisy measurements (SOH estimation error + sensor drift),
+  - missingness model (data drops are informative).
+- **Bayesian updating engine**:
+  - hierarchical Bayes (station parameters shrink toward network mean),
+  - sequential Monte Carlo / particle filter (or a simpler approximation to start),
+  - changepoint detection for regime shifts.
+- **Posterior reporting**:
+  - posterior distributions for key parameters + credible intervals,
+  - “what changed this week/month and why” narrative with evidence,
+  - forecast bands that widen on drift and tighten with stable data.
+
+**Acceptance criteria**
+- With streaming monthly data, the system:
+  - updates parameter posteriors (not just point re-fits),
+  - provides calibrated forecast intervals (coverage holds),
+  - detects drift/regime change and reacts appropriately,
+  - produces an auditable “model governance pack” suitable for lenders:
+    - backtesting history, calibration, parameter drift timeline, and decision impacts.
