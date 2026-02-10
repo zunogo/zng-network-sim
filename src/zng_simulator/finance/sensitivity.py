@@ -87,13 +87,21 @@ def _set_nested_attr(obj: object, path: str, value: float) -> None:
     """Set a nested attribute via dot-path string.
 
     For Pydantic models, we use model_copy to create modified versions.
+    If the target field is typed as ``int``, the value is rounded first
+    to avoid Pydantic validation errors from fractional sweeps.
     """
     parts = path.split(".")
     current = obj
     for part in parts[:-1]:
         current = getattr(current, part)
 
-    # For Pydantic BaseModel, use __dict__ directly (we deepcopy the scenario)
+    # If target field expects int, round the swept value
+    from pydantic import BaseModel as _BM
+    if isinstance(current, _BM):
+        field_info = type(current).model_fields.get(parts[-1])
+        if field_info and field_info.annotation is int:
+            value = round(value)
+
     setattr(current, parts[-1], value)
 
 

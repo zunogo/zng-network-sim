@@ -47,6 +47,11 @@
   - [13.2 Falsifiability & model validation (non-negotiable for bankability)](#132-falsifiability--model-validation-non-negotiable-for-bankability)
   - [13.3 Phase 5 — Field readiness (instrumentation + backtesting + ops loop)](#phase-5--field-readiness-instrumentation--backtesting--ops-loop)
   - [13.4 Phase 6 — Bayesian digital twin (sequential calibration + drift + posterior reporting)](#phase-6--bayesian-digital-twin-sequential-calibration--drift--posterior-reporting)
+- [14. LLM-accessible API](#14-llm-accessible-api)
+  - [14.1 Quick start](#141-quick-start)
+  - [14.2 Endpoints](#142-endpoints)
+  - [14.3 LLM integration (OpenAI / Anthropic)](#143-llm-integration-openai--anthropic)
+  - [14.4 Example workflow](#144-example-workflow)
 
 ---
 
@@ -1307,5 +1312,88 @@ To be defensible to investors/banks, the simulator must be **falsifiable**. That
   - updates parameter posteriors (not just point re-fits),
   - provides calibrated forecast intervals (coverage holds),
   - detects drift/regime change and reacts appropriately,
-  - produces an auditable “model governance pack” suitable for lenders:
+  - produces an auditable "model governance pack" suitable for lenders:
     - backtesting history, calibration, parameter drift timeline, and decision impacts.
+
+---
+
+## 14. LLM-accessible API
+
+The simulator exposes a REST API (FastAPI) that enables **any LLM** — via function calling, tool use, or agent frameworks — to configure scenarios, run simulations, and interpret results programmatically.
+
+### 14.1 Quick start
+
+```bash
+# Start the API server
+uvicorn zng_simulator.api.server:app --reload --port 8000
+
+# Or use the CLI entry point
+zng-api
+```
+
+Once running, visit:
+- **Swagger UI**: `http://localhost:8000/docs` — interactive API explorer
+- **OpenAPI spec**: `http://localhost:8000/openapi.json` — machine-readable spec
+- **Context**: `http://localhost:8000/context` — self-describing manifest for LLMs
+
+### 14.2 Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/context` | Self-describing manifest — business model, parameter schemas, output fields, interpretation guide. **LLMs should call this first.** Supports `?detail_level=compact` or `full`. |
+| `GET` | `/schema` | Full JSON Schema for `Scenario` — all inputs with types, defaults, constraints. |
+| `GET` | `/scenario/defaults` | Complete default scenario as JSON — use as starting point for modifications. |
+| `POST` | `/simulate` | Run a full simulation. Send partial or full Scenario JSON. Returns `SimulationResult` + plain-English narrative. |
+| `POST` | `/simulate/compare` | Compare multiple charger variants side by side. Returns per-variant results + ranking. |
+| `POST` | `/simulate/sensitivity` | Automated parameter sweeps → tornado chart data (NPV impact ranking). |
+| `POST` | `/simulate/optimize` | Binary search for minimum fleet size to hit a financial target at a given confidence. |
+| `POST` | `/simulate/narrative` | Lightweight: returns only the narrative + headline metrics (no raw monthly data). |
+| `GET` | `/tools/openai` | Pre-built function-calling definitions for OpenAI LLMs. |
+| `GET` | `/tools/anthropic` | Pre-built tool-use definitions for Anthropic LLMs. |
+
+### 14.3 LLM integration (OpenAI / Anthropic)
+
+The API provides **ready-to-use tool definitions** for both OpenAI and Anthropic formats:
+
+```python
+import requests
+
+# Get OpenAI-format tool definitions
+tools = requests.get("http://localhost:8000/tools/openai").json()
+
+# Use in OpenAI chat completion
+from openai import OpenAI
+client = OpenAI()
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "system", "content": tools["system_prompt"]},
+              {"role": "user", "content": "What happens if pack cost drops 20%?"}],
+    tools=tools["tools"],
+)
+```
+
+For Anthropic:
+```python
+tools = requests.get("http://localhost:8000/tools/anthropic").json()
+
+import anthropic
+client = anthropic.Anthropic()
+response = client.messages.create(
+    model="claude-sonnet-4-20250514",
+    system=tools["system_prompt"],
+    messages=[{"role": "user", "content": "Compare budget vs premium chargers"}],
+    tools=tools["tools"],
+)
+```
+
+### 14.4 Example workflow
+
+A typical LLM agent interaction:
+
+1. **Discover** → `GET /context?detail_level=full` — LLM reads the full business model, parameter schemas, and interpretation guide
+2. **Baseline** → `POST /simulate` with `{}` — run defaults, understand current state
+3. **What-if** → `POST /simulate` with overrides — e.g. `{"scenario": {"pack": {"unit_cost": 10000}}}`
+4. **Compare** → `POST /simulate/compare` — test multiple charger variants
+5. **Sensitivity** → `POST /simulate/sensitivity` — identify which assumptions matter most
+6. **Optimize** → `POST /simulate/optimize` — find minimum viable fleet
+7. **Interpret** → `POST /simulate/narrative` — get plain-English business interpretation
