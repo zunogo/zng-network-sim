@@ -1101,21 +1101,37 @@ for idx, (show_charger_preview, charger_params) in enumerate(zip(charger_preview
         
         st.markdown("---")
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ==============================  MAIN TABS  ==============================
+# ═══════════════════════════════════════════════════════════════════════════
+# Tabs are defined BEFORE the simulation guard so that the Chat tab is
+# always accessible — even without running a sidebar simulation first.
+operations_tab, finance_tab, intelligence_tab, chat_tab = st.tabs(
+    ["Operations", "Finance", "Intelligence", "Chat"]
+)
+
+# Chat tab — always available (no simulation dependency)
+with chat_tab:
+    from zng_simulator.dashboard.chat.tab import render_chat_tab
+    render_chat_tab()
+
+# Guard: if no simulation has been run yet, show placeholder and stop
 if not (run_clicked or "results" in st.session_state):
-    st.markdown("""
-    <div style="
-        background: linear-gradient(135deg, rgba(108,92,231,0.10), rgba(9,132,227,0.06));
-        border: 1px solid rgba(108,92,231,0.18);
-        border-radius: 10px;
-        padding: 48px 32px;
-        text-align: center;
-        margin: 2rem 0;
-    ">
-        <div style="font-size: 2rem; margin-bottom: 6px;">⚡</div>
-        <div style="font-family: 'Inter', sans-serif; font-size: 1.15rem; font-weight: 700; color: #fff; margin-bottom: 4px; letter-spacing: -0.3px;">Ready to Simulate</div>
-        <div style="font-family: 'Inter', sans-serif; color: rgba(255,255,255,0.42); font-size: 0.82rem; font-weight: 400;">Configure your scenario in the sidebar, then click <b>Run Simulation</b></div>
-    </div>
-    """, unsafe_allow_html=True)
+    with operations_tab:
+        st.markdown("""
+        <div style="
+            background: linear-gradient(135deg, rgba(108,92,231,0.10), rgba(9,132,227,0.06));
+            border: 1px solid rgba(108,92,231,0.18);
+            border-radius: 10px;
+            padding: 48px 32px;
+            text-align: center;
+            margin: 2rem 0;
+        ">
+            <div style="font-size: 2rem; margin-bottom: 6px;">⚡</div>
+            <div style="font-family: 'Inter', sans-serif; font-size: 1.15rem; font-weight: 700; color: #fff; margin-bottom: 4px; letter-spacing: -0.3px;">Ready to Simulate</div>
+            <div style="font-family: 'Inter', sans-serif; color: rgba(255,255,255,0.42); font-size: 0.82rem; font-weight: 400;">Configure your scenario in the sidebar, then click <b>Run Simulation</b></div>
+        </div>
+        """, unsafe_allow_html=True)
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -1132,8 +1148,6 @@ if _is_stochastic:
     _phase_label = f"Phase 2 — Stochastic Engine · {sim_mc} MC runs · seed={sim_seed}" if _has_mc else "Phase 2 — Single Stochastic Run"
 else:
     _phase_label = "Phase 1 — Static Unit Economics"
-st.caption(f"{_phase_label} · Finance · Intelligence · Show the Math")
-
 # Shorthand refs used throughout
 v = vehicle
 p = pack
@@ -1141,15 +1155,10 @@ multi_charger = len(results) > 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ==============================  MAIN TABS  ==============================
-# ═══════════════════════════════════════════════════════════════════════════
-operations_tab, finance_tab, intelligence_tab = st.tabs(["Operations", "Finance", "Intelligence"])
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # ==================  OPERATIONS TAB  =====================================
 # ═══════════════════════════════════════════════════════════════════════════
 with operations_tab:
+    st.caption(f"{_phase_label} · Finance · Intelligence · Show the Math")
 
     # ── SECTION 1 — Operational Overview ─────────────────────────────────
     st.divider()
