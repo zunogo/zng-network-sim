@@ -8,9 +8,8 @@ from typing import Any
 import streamlit as st
 
 from zng_simulator.dashboard.chat.client import ChatClient, get_api_key
-from zng_simulator.dashboard.chat.executor import execute_tool, condense_result
+from zng_simulator.dashboard.chat.executor import execute_tool
 from zng_simulator.dashboard.chat.renderer import render_chat_result
-from zng_simulator.models.results import SimulationResult
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -24,11 +23,20 @@ def _init_state() -> None:
         st.session_state.chat_display = []            # UI display items
     if "chat_client" not in st.session_state:
         st.session_state.chat_client = None
+    if "chat_input_tokens" not in st.session_state:
+        st.session_state.chat_input_tokens = 0       # Cumulative input tokens
+    if "chat_output_tokens" not in st.session_state:
+        st.session_state.chat_output_tokens = 0      # Cumulative output tokens
+    if "chat_api_calls" not in st.session_state:
+        st.session_state.chat_api_calls = 0          # Number of API calls
 
 
 def _clear_chat() -> None:
     st.session_state.chat_messages = []
     st.session_state.chat_display = []
+    st.session_state.chat_input_tokens = 0
+    st.session_state.chat_output_tokens = 0
+    st.session_state.chat_api_calls = 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -60,6 +68,12 @@ def _process_message(user_input: str) -> None:
                 "content": f"API error: {e}",
             })
             return
+
+        # Track token usage
+        st.session_state.chat_api_calls += 1
+        if hasattr(response, "usage") and response.usage:
+            st.session_state.chat_input_tokens += response.usage.input_tokens
+            st.session_state.chat_output_tokens += response.usage.output_tokens
 
         # Add assistant response to conversation history
         st.session_state.chat_messages.append({
@@ -214,11 +228,49 @@ def render_chat_tab() -> None:
             _clear_chat()
             st.rerun()
 
-    # Render chat history
-    _render_display()
+    # Render chat history or welcome message
+    if not st.session_state.chat_display:
+        with st.chat_message("assistant"):
+            st.markdown(
+                "Hi! I'm your battery swap network analyst. "
+                "Ask me anything — for example:\n\n"
+                '- *"Run a default simulation"*\n'
+                '- *"What if pack cost drops to 10,000?"*\n'
+                '- *"Compare budget vs premium chargers"*\n'
+                '- *"Which parameters affect NPV the most?"*\n'
+                '- *"What\'s the minimum fleet for positive cash flow?"*'
+            )
+    else:
+        _render_display()
 
     # Chat input
     if user_input := st.chat_input("Ask about your battery swap network..."):
         with st.spinner("Thinking..."):
             _process_message(user_input)
         st.rerun()
+
+    # API usage metrics
+    total_input = st.session_state.chat_input_tokens
+    total_output = st.session_state.chat_output_tokens
+    total_calls = st.session_state.chat_api_calls
+    if total_calls > 0:
+        total_tokens = total_input + total_output
+        # Sonnet pricing: $3/M input, $15/M output
+        est_cost = (total_input * 3 + total_output * 15) / 1_000_000
+        st.markdown(f"""
+        <div style="
+            display: flex; gap: 24px; align-items: center;
+            padding: 8px 16px; margin-top: 12px;
+            background: rgba(108,92,231,0.06);
+            border: 1px solid rgba(108,92,231,0.12);
+            border-radius: 8px;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.75rem; color: rgba(255,255,255,0.45);
+        ">
+            <span>API calls: <b style="color:rgba(255,255,255,0.7)">{total_calls}</b></span>
+            <span>Input: <b style="color:rgba(255,255,255,0.7)">{total_input:,}</b> tokens</span>
+            <span>Output: <b style="color:rgba(255,255,255,0.7)">{total_output:,}</b> tokens</span>
+            <span>Total: <b style="color:rgba(255,255,255,0.7)">{total_tokens:,}</b> tokens</span>
+            <span>Est. cost: <b style="color:rgba(255,255,255,0.7)">${est_cost:.4f}</b></span>
+        </div>
+        """, unsafe_allow_html=True)
