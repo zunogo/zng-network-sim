@@ -53,15 +53,26 @@ Always explain results in business terms. Focus on what the numbers mean and wha
 
 
 def get_api_key() -> str | None:
-    """Get Anthropic API key from environment or .env file."""
+    """Get Anthropic API key from Streamlit secrets, environment, or .env file."""
+    # 1. Streamlit secrets (Streamlit Cloud deployment)
+    try:
+        import streamlit as st
+        key = st.secrets.get("ANTHROPIC_API_KEY")
+        if key:
+            return key
+    except Exception:
+        pass
+    # 2. Environment variable
     key = os.environ.get("ANTHROPIC_API_KEY")
-    if not key:
-        try:
-            from dotenv import load_dotenv
-            load_dotenv()
-            key = os.environ.get("ANTHROPIC_API_KEY")
-        except ImportError:
-            pass
+    if key:
+        return key
+    # 3. .env file fallback (local dev)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        key = os.environ.get("ANTHROPIC_API_KEY")
+    except ImportError:
+        pass
     return key
 
 
