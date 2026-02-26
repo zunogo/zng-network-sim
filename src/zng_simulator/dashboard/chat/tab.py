@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
 import streamlit as st
 
 from zng_simulator.dashboard.chat.client import ChatClient, get_api_key
-from zng_simulator.dashboard.chat.executor import execute_tool
+from zng_simulator.dashboard.chat.executor import attach_financials, condense_result, execute_tool
 from zng_simulator.dashboard.chat.renderer import render_chat_result
 
 
@@ -37,6 +38,188 @@ def _clear_chat() -> None:
     st.session_state.chat_input_tokens = 0
     st.session_state.chat_output_tokens = 0
     st.session_state.chat_api_calls = 0
+
+
+def _build_sidebar_context() -> dict:
+    """Build a compact context dict from sidebar simulation results.
+
+    Attaches financial overlays (DCF, DSCR, statements) to the raw engine
+    results so that condensed data includes NPV, IRR, and other finance metrics.
+    """
+    results = st.session_state.get("results", [])
+    scenario = st.session_state.get("scenario")
+    if not results or not scenario:
+        return {}
+
+    # Deep copy results to avoid mutating shared session state objects
+    # attach_financials sets result.dcf, result.dscr etc. in-place
+    enriched = []
+    for r in results:
+        r_copy = copy.deepcopy(r)
+        cv = next(
+            (c for c in scenario.charger_variants if c.name == r_copy.charger_variant_id),
+            scenario.charger_variants[0],
+        )
+        enriched.append(attach_financials(r_copy, scenario, cv))
+
+    # Compact scenario summary
+    scenario_summary = {
+        "fleet_size": scenario.revenue.initial_fleet_size,
+        "horizon_months": scenario.simulation.horizon_months,
+        "engine": scenario.simulation.engine,
+        "vehicle": scenario.vehicle.name,
+        "pack_cost": scenario.pack.unit_cost,
+        "swap_price": scenario.revenue.price_per_swap,
+        "num_stations": scenario.station.num_stations,
+        "num_charger_variants": len(scenario.charger_variants),
+    }
+
+    ctx: dict[str, Any] = {
+        "scenario_summary": scenario_summary,
+        "results": [condense_result(r) for r in enriched],
+    }
+
+    # Intelligence tab: pilot sizing results
+    ps_result = st.session_state.get("ps_result")
+    if ps_result is not None:
+        try:
+            ctx["pilot_sizing"] = {
+                "recommended_fleet": getattr(ps_result, "recommended_fleet_size", None),
+                "target_metric": getattr(ps_result, "target_metric", None),
+                "search_log": [
+                    {
+                        "fleet_size": entry.fleet_size,
+                        "npv": entry.npv,
+                        "break_even": entry.break_even_month,
+                        "passed": entry.passed,
+                    }
+                    for entry in (getattr(ps_result, "search_log", None) or [])[:5]
+                ],
+            }
+        except Exception:
+            pass
+
+    # Intelligence tab: auto-tune results
+    tune_result = st.session_state.get("tune_result")
+    if tune_result is not None:
+        try:
+            ctx["auto_tune"] = {
+                "tuned_params": [
+                    {
+                        "name": p.param_path,
+                        "original": p.original_value,
+                        "tuned": p.tuned_value,
+                        "confidence": p.confidence,
+                    }
+                    for p in (getattr(tune_result, "parameters", None) or [])
+                ],
+            }
+        except Exception:
+            pass
+
+    # Intelligence tab: tuned comparison
+    tuned_cmp = st.session_state.get("tuned_comparison")
+    if tuned_cmp is not None:
+        ctx["tuned_comparison"] = tuned_cmp
+
+    return ctx
+
+
+def _load_sidebar_context(api_key: str) -> None:
+    """Load sidebar simulation context into chat, clearing any existing conversation."""
+    sidebar_ctx = _build_sidebar_context()
+    if not sidebar_ctx:
+        return
+
+    _clear_chat()
+
+    # Recreate client with sidebar context in system prompt
+    st.session_state.chat_client = ChatClient(
+        api_key=api_key, sidebar_context=sidebar_ctx,
+    )
+
+    # Build a human-readable summary for display
+    sc = sidebar_ctx["scenario_summary"]
+    r0 = sidebar_ctx["results"][0]
+    summary = r0.get("summary", {})
+    cpc = r0.get("cpc_waterfall", {}).get("total", summary.get("avg_cost_per_cycle", 0))
+    be = summary.get("break_even_month")
+    be_str = f"month {be}" if be else "not reached"
+
+    # Finance metrics (now available after attach_financials)
+    dcf = r0.get("dcf", {}) or {}
+    npv = dcf.get("npv", 0)
+    irr = dcf.get("irr")
+    irr_str = f"{irr * 100:.1f}%" if irr else "N/A"
+    dscr = r0.get("dscr", {}) or {}
+    avg_dscr = dscr.get("avg_dscr")
+    dscr_str = f"{avg_dscr:.2f}" if avg_dscr else "N/A"
+
+    context_text = (
+        f"Loaded simulation: {sc['engine']} engine, "
+        f"{sc['fleet_size']:,} vehicles, {sc['horizon_months']} months, "
+        f"{sc['num_charger_variants']} charger variant(s). "
+        f"CPC \u20b9{cpc:,.2f}, NPV \u20b9{npv:,.0f}, IRR {irr_str}, "
+        f"DSCR {dscr_str}, break-even {be_str}."
+    )
+
+    # Add context banner to display
+    st.session_state.chat_display.append({
+        "type": "context_loaded",
+        "content": context_text,
+    })
+
+    # Also include Intelligence tab data if available
+    intel_context = ""
+    if sidebar_ctx.get("pilot_sizing"):
+        ps = sidebar_ctx["pilot_sizing"]
+        intel_context += (
+            f"\n\nPilot Sizing: recommended fleet = {ps.get('recommended_fleet', 'N/A')}, "
+            f"target = {ps.get('target_metric', 'N/A')}"
+        )
+    if sidebar_ctx.get("auto_tune"):
+        at = sidebar_ctx["auto_tune"]
+        intel_context += (
+            f"\n\nAuto-Tune: {len(at.get('tuned_params', []))} parameters calibrated from field data"
+        )
+
+    # Inject synthetic messages so Claude has the context in conversation history
+    condensed_json = json.dumps(sidebar_ctx["results"], default=str)
+    st.session_state.chat_messages.append({
+        "role": "user",
+        "content": (
+            "I just ran a simulation from the dashboard sidebar. "
+            f"Here are the results: {condensed_json}"
+            + intel_context
+        ),
+    })
+    st.session_state.chat_messages.append({
+        "role": "assistant",
+        "content": (
+            f"I've loaded your simulation context. You ran a {sc['engine']} simulation "
+            f"with {sc['fleet_size']:,} vehicles over {sc['horizon_months']} months. "
+            f"Key results: CPC \u20b9{cpc:,.2f}/cycle, NPV \u20b9{npv:,.0f}, "
+            f"IRR {irr_str}, DSCR {dscr_str}, break-even {be_str}. "
+            "How can I help you explore further?"
+        ),
+    })
+
+    # Show Claude's welcome as a display item
+    st.session_state.chat_display.append({
+        "type": "assistant",
+        "content": (
+            f"I've loaded your simulation context. You ran a **{sc['engine']}** simulation "
+            f"with **{sc['fleet_size']:,}** vehicles over **{sc['horizon_months']}** months.\n\n"
+            f"| Metric | Value |\n|--------|-------|\n"
+            f"| CPC | \u20b9{cpc:,.2f}/cycle |\n"
+            f"| NPV | \u20b9{npv:,.0f} |\n"
+            f"| IRR | {irr_str} |\n"
+            f"| DSCR | {dscr_str} |\n"
+            f"| Break-even | {be_str} |\n"
+            f"| Swap Price | \u20b9{sc['swap_price']}/visit |\n\n"
+            "How can I help you explore further?"
+        ),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -181,6 +364,9 @@ def _render_display() -> None:
                     item.get("sim_result"),
                 )
 
+        elif item_type == "context_loaded":
+            st.info(item["content"])
+
         elif item_type == "error":
             with st.chat_message("assistant"):
                 st.error(item["content"])
@@ -218,6 +404,18 @@ def render_chat_tab() -> None:
     # Initialize client if needed
     if st.session_state.chat_client is None:
         st.session_state.chat_client = ChatClient(api_key=api_key)
+
+    # Check for pending sidebar context (from "Continue in Chat" button)
+    if st.session_state.pop("chat_sidebar_pending", False):
+        _load_sidebar_context(api_key)
+        # Auto-switch to Chat tab via JS (Streamlit has no native tab switch API)
+        st.components.v1.html(
+            """<script>
+            const tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+            if (tabs.length >= 4) tabs[3].click();
+            </script>""",
+            height=0,
+        )
 
     # Header
     col1, col2 = st.columns([4, 1])

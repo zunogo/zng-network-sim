@@ -615,6 +615,7 @@ scenario = Scenario(
     station=station, opex=opex_cfg, revenue=revenue_cfg, chaos=chaos_cfg,
     demand=demand_cfg, finance=finance_cfg, simulation=sim_cfg,
 )
+st.session_state["scenario"] = scenario
 
 run_clicked = st.sidebar.button("Run Simulation", type="primary", use_container_width=True)
 
@@ -1104,6 +1105,14 @@ for idx, (show_charger_preview, charger_params) in enumerate(zip(charger_preview
 # ═══════════════════════════════════════════════════════════════════════════
 # ==============================  MAIN TABS  ==============================
 # ═══════════════════════════════════════════════════════════════════════════
+
+def _continue_in_chat_button(tab_key: str) -> None:
+    """Render a 'Continue in Chat' button that transfers simulation context."""
+    st.divider()
+    if st.button("\U0001f4ac  Continue in Chat", use_container_width=True, key=f"chat_btn_{tab_key}"):
+        st.session_state["chat_sidebar_pending"] = True
+        st.rerun()
+
 # Tabs are defined BEFORE the simulation guard so that the Chat tab is
 # always accessible — even without running a sidebar simulation first.
 operations_tab, finance_tab, intelligence_tab, chat_tab = st.tabs(
@@ -1649,6 +1658,8 @@ with operations_tab:
         else:
             _render_reliability_block(results[0])
 
+    _continue_in_chat_button("ops")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ==================  FINANCE TAB  ========================================
@@ -1982,6 +1993,8 @@ with finance_tab:
     else:
         cv0 = next(c for c in charger_variants if c.name == results[0].charger_variant_id)
         _render_finance_block(results[0], cv0)
+
+    _continue_in_chat_button("fin")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2504,3 +2517,5 @@ the one with the highest NPV that meets the target.
             mime="text/csv",
             key="dl_charger",
         )
+
+    _continue_in_chat_button("intel")

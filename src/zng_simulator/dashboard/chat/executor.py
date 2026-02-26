@@ -43,10 +43,12 @@ def _build_scenario(overrides: dict[str, Any]) -> Scenario:
     return Scenario(**defaults)
 
 
-def _run_with_financials(scenario: Scenario, charger: ChargerVariant) -> SimulationResult:
-    """Run engine + attach financial overlays (DCF, DSCR, statements)."""
-    result = run_engine(scenario, charger)
-
+def attach_financials(
+    result: SimulationResult,
+    scenario: Scenario,
+    charger: ChargerVariant,
+) -> SimulationResult:
+    """Attach financial overlays (DCF, DSCR, statements) to an existing result."""
     fin = scenario.finance
     sim = scenario.simulation
     total_capex = result.summary.total_capex
@@ -79,6 +81,12 @@ def _run_with_financials(scenario: Scenario, charger: ChargerVariant) -> Simulat
         pass
 
     return result
+
+
+def _run_with_financials(scenario: Scenario, charger: ChargerVariant) -> SimulationResult:
+    """Run engine + attach financial overlays (DCF, DSCR, statements)."""
+    result = run_engine(scenario, charger)
+    return attach_financials(result, scenario, charger)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -83,10 +84,12 @@ class ChatClient:
         self,
         api_key: str,
         model: str = "claude-sonnet-4-20250514",
+        sidebar_context: dict[str, Any] | None = None,
     ):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
         self.tools = get_anthropic_tools()
+        self.sidebar_context = sidebar_context
         self.system_prompt = self._build_system_prompt()
 
     def _build_system_prompt(self) -> str:
@@ -99,10 +102,29 @@ class ChatClient:
                 f"  {section.section}: {', '.join(param_names)}"
             )
         params_text = "\n".join(sections_summary)
-        return (
+        prompt = (
             _SYSTEM_PROMPT
             + f"\n\nAVAILABLE INPUT PARAMETERS:\n{params_text}\n"
         )
+
+        if self.sidebar_context:
+            prompt += (
+                "\n\nACTIVE SIMULATION CONTEXT:\n"
+                "The user has already run a simulation from the dashboard sidebar. "
+                "The results are loaded below (including full financial overlays: DCF, DSCR, P&L). "
+                "When they ask follow-up questions, reference these results directly. "
+                "You do NOT need to call run_simulation again unless the user wants to change parameters.\n\n"
+                f"Scenario: {json.dumps(self.sidebar_context.get('scenario_summary', {}), default=str)}\n"
+                f"Results: {json.dumps(self.sidebar_context.get('results', []), default=str)}\n"
+            )
+            if self.sidebar_context.get("pilot_sizing"):
+                prompt += f"Pilot Sizing: {json.dumps(self.sidebar_context['pilot_sizing'], default=str)}\n"
+            if self.sidebar_context.get("auto_tune"):
+                prompt += f"Auto-Tune: {json.dumps(self.sidebar_context['auto_tune'], default=str)}\n"
+            if self.sidebar_context.get("tuned_comparison"):
+                prompt += f"Tuned vs Original: {json.dumps(self.sidebar_context['tuned_comparison'], default=str)}\n"
+
+        return prompt
 
     def send_message(
         self,

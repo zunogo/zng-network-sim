@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import streamlit as st
@@ -117,7 +118,7 @@ def render_cash_flow_chart(result: SimulationResult) -> None:
         yaxis_title="₹",
         **_PLOTLY_LAYOUT,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=f"chat_cf_{uuid.uuid4().hex[:8]}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -150,7 +151,7 @@ def render_cpc_waterfall(result: SimulationResult) -> None:
         xaxis_title="₹/cycle",
         **_PLOTLY_LAYOUT,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=f"chat_cpc_{uuid.uuid4().hex[:8]}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -210,7 +211,7 @@ def render_tornado_chart(data: dict) -> None:
         barmode="overlay",
         **_PLOTLY_LAYOUT,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=f"chat_tornado_{uuid.uuid4().hex[:8]}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
