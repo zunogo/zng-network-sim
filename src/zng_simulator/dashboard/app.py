@@ -12,6 +12,7 @@ ingestion, variance analysis, auto-tuning, and recommendation alerts.
 from __future__ import annotations
 
 import io
+import math
 import os
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from zng_simulator.config import (
     SimulationConfig,
     StationConfig,
     VehicleConfig,
+    compute_docks_from_float,
 )
 from zng_simulator.engine.orchestrator import run_engine
 from zng_simulator.engine.field_data import (
@@ -51,18 +53,51 @@ from zng_simulator.models.field_data import FieldDataSet
 from zng_simulator.models.results import SimulationResult
 
 # ---------------------------------------------------------------------------
-# Default instances — single source of truth for sidebar defaults
+# Default instances — read from loaded preset or Pydantic defaults
 # ---------------------------------------------------------------------------
-_DEF_V = VehicleConfig()
-_DEF_P = PackSpec()
-_DEF_C = ChargerVariant()
-_DEF_S = StationConfig()
-_DEF_O = OpExConfig()
-_DEF_R = RevenueConfig()
-_DEF_CH = ChaosConfig()
-_DEF_D = DemandConfig()
-_DEF_F = FinanceConfig()
-_DEF_SIM = SimulationConfig()
+_loaded = st.session_state.get("loaded_preset")
+_DEF_V = _loaded.vehicle if _loaded else VehicleConfig()
+_DEF_P = _loaded.pack if _loaded else PackSpec()
+_DEF_C = _loaded.charger_variants[0] if _loaded and _loaded.charger_variants else ChargerVariant()
+_DEF_S = _loaded.station if _loaded else StationConfig()
+_DEF_O = _loaded.opex if _loaded else OpExConfig()
+_DEF_R = _loaded.revenue if _loaded else RevenueConfig()
+_DEF_CH = _loaded.chaos if _loaded else ChaosConfig()
+_DEF_D = _loaded.demand if _loaded else DemandConfig()
+_DEF_F = _loaded.finance if _loaded else FinanceConfig()
+_DEF_SIM = _loaded.simulation if _loaded else SimulationConfig()
+
+# ---------------------------------------------------------------------------
+# Preset management — save / load / reset sidebar configuration
+# ---------------------------------------------------------------------------
+_SIDEBAR_KEYS = [
+    "sim_horizon", "sim_engine", "sim_mc", "sim_seed",
+    "v_name", "v_packs", "v_cap", "v_km", "v_wh", "v_swap", "v_buffer",
+    "p_name", "p_cap", "p_chem", "p_cost", "p_salvage", "p_beta",
+    "p_retire", "p_dod", "p_aggr", "p_mtbf", "p_mttr", "p_repair",
+    "p_thresh", "p_repl", "p_spare", "pack_failure_preview",
+    "s_num", "s_hours", "s_cab", "s_site", "s_grid", "s_sw", "s_dep",
+    "o_tariff", "o_rent", "o_aux", "o_prev", "o_corr", "o_ins", "o_log",
+    "o_labor", "o_overhead",
+    "r_price", "r_fleet", "r_add", "r_float_pct",
+    "ch_sab", "ch_aggr",
+    "f_debt", "f_rate", "f_tenor", "f_grace", "f_depr", "f_life",
+    "f_tax", "f_wdv", "f_tv", "f_tg", "f_dscr",
+    "d_dist", "d_vol", "d_bimodal_ratio", "d_bimodal_sep", "d_bimodal_std",
+    "d_wknd", "d_season", "demand_preview_check",
+    "num_chargers",
+]
+
+
+def _clear_sidebar_widget_state() -> None:
+    """Clear sidebar widget keys so they re-initialise with new _DEF_* values."""
+    for key in _SIDEBAR_KEYS:
+        st.session_state.pop(key, None)
+    for i in range(5):
+        for prefix in ("cn_", "cc_", "cp_", "ce_", "cm_", "cmt_", "cr_",
+                        "ct_", "crc_", "cs_", "cfd_", "cwb_",
+                        "charger_failure_preview_"):
+            st.session_state.pop(f"{prefix}{i}", None)
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -313,30 +348,33 @@ st.sidebar.header("Scenario Inputs")
 
 # --- Simulation (define sim_engine first, needed by other sections) ---
 with st.sidebar.expander("Simulation", expanded=True):
-    sim_horizon = st.number_input("Horizon months", 6, 240, _DEF_SIM.horizon_months, 12)
+    sim_horizon = st.number_input("Horizon months", 6, value=_DEF_SIM.horizon_months, step=12, key="sim_horizon")
     _ENGINES = ["static", "stochastic"]
     sim_engine = st.selectbox("Engine", _ENGINES, index=_ENGINES.index(_DEF_SIM.engine),
-                              help="Static = Phase 1 deterministic · Stochastic = Phase 2 with noise, degradation cohorts, charger failures")
+                              help="Static = Phase 1 deterministic · Stochastic = Phase 2 with noise, degradation cohorts, charger failures",
+                              key="sim_engine")
     c1, c2 = st.columns(2)
-    sim_mc = c1.number_input("MC runs", 1, 5000, _DEF_SIM.monte_carlo_runs if sim_engine == "stochastic" else 1,
+    sim_mc = c1.number_input("MC runs", 1, value=_DEF_SIM.monte_carlo_runs if sim_engine == "stochastic" else 1,
                              disabled=(sim_engine == "static"),
-                             help="Number of Monte-Carlo iterations (stochastic only)")
-    sim_seed = c2.number_input("Seed", 0, 999999, 42,
+                             help="Number of Monte-Carlo iterations (stochastic only)",
+                             key="sim_mc")
+    sim_seed = c2.number_input("Seed", 0, value=42,
                                disabled=(sim_engine == "static"),
-                               help="Random seed for reproducibility")
+                               help="Random seed for reproducibility",
+                               key="sim_seed")
 
 # --- Vehicle ---
 with st.sidebar.expander("Vehicle", expanded=True):
-    v_name = st.text_input("Vehicle name", _DEF_V.name)
+    v_name = st.text_input("Vehicle name", _DEF_V.name, key="v_name")
     c1, c2 = st.columns(2)
-    v_packs = c1.number_input("Packs per vehicle", 1, 4, _DEF_V.packs_per_vehicle)
-    v_cap = c2.number_input("Pack capacity kWh", 0.1, 10.0, _DEF_V.pack_capacity_kwh, 0.01, format="%.2f")
+    v_packs = c1.number_input("Packs per vehicle", 1, value=_DEF_V.packs_per_vehicle, key="v_packs")
+    v_cap = c2.number_input("Pack capacity kWh", 0.1, value=_DEF_V.pack_capacity_kwh, step=0.01, format="%.2f", key="v_cap")
     c1, c2 = st.columns(2)
-    v_km = c1.number_input("Daily km", 1.0, 500.0, _DEF_V.avg_daily_km, 10.0)
-    v_wh = c2.number_input("Wh per km", 1.0, 100.0, _DEF_V.energy_consumption_wh_per_km, 1.0)
+    v_km = c1.number_input("Daily km", 1.0, value=_DEF_V.avg_daily_km, step=10.0, key="v_km")
+    v_wh = c2.number_input("Wh per km", 1.0, value=_DEF_V.energy_consumption_wh_per_km, step=1.0, key="v_wh")
     c1, c2 = st.columns(2)
-    v_swap = c1.number_input("Swap time min", 0.5, 10.0, _DEF_V.swap_time_minutes, 0.5)
-    v_buffer = c2.number_input("Range buffer %", 0, 50, int(_DEF_V.range_anxiety_buffer_pct * 100), 5)
+    v_swap = c1.number_input("Swap time min", 0.5, value=_DEF_V.swap_time_minutes, step=0.5, key="v_swap")
+    v_buffer = c2.number_input("Range buffer %", 0, value=int(_DEF_V.range_anxiety_buffer_pct * 100), step=5, key="v_buffer")
 
 vehicle = VehicleConfig(
     name=v_name, packs_per_vehicle=v_packs, pack_capacity_kwh=v_cap,
@@ -347,29 +385,29 @@ vehicle = VehicleConfig(
 # --- Pack ---
 _CHEM_OPTIONS = ["NMC", "LFP"]
 with st.sidebar.expander("Battery Pack"):
-    p_name = st.text_input("Pack name", _DEF_P.name)
+    p_name = st.text_input("Pack name", _DEF_P.name, key="p_name")
     c1, c2 = st.columns(2)
-    p_cap = c1.number_input("Capacity kWh", 0.1, 10.0, _DEF_P.nominal_capacity_kwh, 0.01, format="%.2f", key="p_cap")
-    p_chem = c2.selectbox("Chemistry", _CHEM_OPTIONS, index=_CHEM_OPTIONS.index(_DEF_P.chemistry) if _DEF_P.chemistry in _CHEM_OPTIONS else 0)
+    p_cap = c1.number_input("Capacity kWh", 0.1, value=_DEF_P.nominal_capacity_kwh, step=0.01, format="%.2f", key="p_cap")
+    p_chem = c2.selectbox("Chemistry", _CHEM_OPTIONS, index=_CHEM_OPTIONS.index(_DEF_P.chemistry) if _DEF_P.chemistry in _CHEM_OPTIONS else 0, key="p_chem")
     c1, c2 = st.columns(2)
-    p_cost = c1.number_input("Unit cost ₹", 0, 200000, int(_DEF_P.unit_cost), 1000)
-    p_salvage = c2.number_input("Salvage ₹", 0, 100000, int(_DEF_P.second_life_salvage_value), 500)
+    p_cost = c1.number_input("Unit cost ₹", 0, value=int(_DEF_P.unit_cost), step=1000, key="p_cost")
+    p_salvage = c2.number_input("Salvage ₹", 0, value=int(_DEF_P.second_life_salvage_value), step=500, key="p_salvage")
     c1, c2 = st.columns(2)
-    p_beta = c1.number_input("β %/cycle", 0.001, 1.0, _DEF_P.cycle_degradation_rate_pct, 0.01, format="%.3f")
-    p_retire = c2.number_input("Retire SOH %", 10, 100, int(_DEF_P.retirement_soh_pct * 100), 5)
+    p_beta = c1.number_input("β %/cycle", 0.001, value=_DEF_P.cycle_degradation_rate_pct, step=0.01, format="%.3f", key="p_beta")
+    p_retire = c2.number_input("Retire SOH %", 10, value=int(_DEF_P.retirement_soh_pct * 100), step=5, key="p_retire")
     c1, c2 = st.columns(2)
-    p_dod = c1.number_input("DoD %", 10, 100, int(_DEF_P.depth_of_discharge_pct * 100), 5)
-    p_aggr = c2.number_input("Aggressiveness", 0.1, 3.0, _DEF_P.aggressiveness_multiplier, 0.1)
+    p_dod = c1.number_input("DoD %", 10, value=int(_DEF_P.depth_of_discharge_pct * 100), step=5, key="p_dod")
+    p_aggr = c2.number_input("Aggressiveness", 0.1, value=_DEF_P.aggressiveness_multiplier, step=0.1, key="p_aggr")
     st.markdown("---\n**Pack Failure Model**")
     c1, c2 = st.columns(2)
-    p_mtbf = c1.number_input("MTBF hrs", 1000, 500000, int(_DEF_P.mtbf_hours), 1000, key="p_mtbf")
-    p_mttr = c2.number_input("MTTR hrs", 1, 200, int(_DEF_P.mttr_hours), 1, key="p_mttr")
+    p_mtbf = c1.number_input("MTBF hrs", 1000, value=int(_DEF_P.mtbf_hours), step=1000, key="p_mtbf")
+    p_mttr = c2.number_input("MTTR hrs", 1, value=int(_DEF_P.mttr_hours), step=1, key="p_mttr")
     c1, c2 = st.columns(2)
-    p_repair = c1.number_input("Repair ₹", 0, 50000, int(_DEF_P.repair_cost_per_event), 500, key="p_repair")
-    p_thresh = c2.number_input("Replace after", 1, 10, _DEF_P.replacement_threshold, 1, key="p_thresh")
+    p_repair = c1.number_input("Repair ₹", 0, value=int(_DEF_P.repair_cost_per_event), step=500, key="p_repair")
+    p_thresh = c2.number_input("Replace after", 1, value=_DEF_P.replacement_threshold, step=1, key="p_thresh")
     c1, c2 = st.columns(2)
-    p_repl = c1.number_input("Replace ₹", 0, 200000, int(_DEF_P.full_replacement_cost), 1000, key="p_repl")
-    p_spare = c2.number_input("Spare/stn ₹", 0, 200000, int(_DEF_P.spare_packs_cost_per_station), 1000, key="p_spare")
+    p_repl = c1.number_input("Replace ₹", 0, value=int(_DEF_P.full_replacement_cost), step=1000, key="p_repl")
+    p_spare = c2.number_input("Spare/stn ₹", 0, value=int(_DEF_P.spare_packs_cost_per_station), step=1000, key="p_spare")
     
     # Preview button for pack failures
     if sim_engine == "stochastic":
@@ -391,31 +429,33 @@ pack = PackSpec(
 
 # --- Chargers ---
 with st.sidebar.expander("Charger Variants"):
-    num_chargers = st.number_input("Variants to compare", 1, 5, 1)
+    _loaded_num_chargers = len(_loaded.charger_variants) if _loaded else 1
+    num_chargers = st.number_input("Variants to compare", 1, value=_loaded_num_chargers, key="num_chargers")
     charger_variants: list[ChargerVariant] = []
     charger_preview_flags: list[bool] = []
     charger_preview_params: list[dict] = []
     for i in range(num_chargers):
+        _def_ci = _loaded.charger_variants[i] if _loaded and i < len(_loaded.charger_variants) else _DEF_C
         st.markdown(f"---\n**Charger {i + 1}**")
-        c_name = st.text_input("Name", f"Charger-{i+1}", key=f"cn_{i}")
+        c_name = st.text_input("Name", _def_ci.name or f"Charger-{i+1}", key=f"cn_{i}")
         c1, c2 = st.columns(2)
-        c_cost = c1.number_input("Cost per slot ₹", 0, 200000, int(_DEF_C.purchase_cost_per_slot), 1000, key=f"cc_{i}")
-        c_power = c2.number_input("Rated power W", 100, 10000, int(_DEF_C.rated_power_w), 100, key=f"cp_{i}")
+        c_cost = c1.number_input("Cost per slot ₹", 0, value=int(_def_ci.purchase_cost_per_slot), step=1000, key=f"cc_{i}")
+        c_power = c2.number_input("Rated power W", 100, value=int(_def_ci.rated_power_w), step=100, key=f"cp_{i}")
         c1, c2 = st.columns(2)
-        c_eff = c1.number_input("Efficiency %", 50, 100, int(_DEF_C.charging_efficiency_pct * 100), 1, key=f"ce_{i}")
-        c_mtbf = c2.number_input("MTBF hrs", 1000, 200000, int(_DEF_C.mtbf_hours), 1000, key=f"cm_{i}")
+        c_eff = c1.number_input("Efficiency %", 50, value=int(_def_ci.charging_efficiency_pct * 100), step=1, key=f"ce_{i}")
+        c_mtbf = c2.number_input("MTBF hrs", 1000, value=int(_def_ci.mtbf_hours), step=1000, key=f"cm_{i}")
         c1, c2 = st.columns(2)
-        c_mttr = c1.number_input("MTTR hrs", 1, 200, int(_DEF_C.mttr_hours), 4, key=f"cmt_{i}")
-        c_repair = c2.number_input("Repair cost ₹", 0, 50000, int(_DEF_C.repair_cost_per_event), 500, key=f"cr_{i}")
+        c_mttr = c1.number_input("MTTR hrs", 1, value=int(_def_ci.mttr_hours), step=4, key=f"cmt_{i}")
+        c_repair = c2.number_input("Repair cost ₹", 0, value=int(_def_ci.repair_cost_per_event), step=500, key=f"cr_{i}")
         c1, c2 = st.columns(2)
-        c_thresh = c1.number_input("Replace after #", 1, 10, _DEF_C.replacement_threshold, 1, key=f"ct_{i}")
-        c_repl = c2.number_input("Replace cost ₹", 0, 200000, int(_DEF_C.full_replacement_cost), 1000, key=f"crc_{i}")
-        c_spare = st.number_input("Spare inventory ₹", 0, 200000, int(_DEF_C.spare_inventory_cost), 1000, key=f"cs_{i}")
+        c_thresh = c1.number_input("Replace after #", 1, value=_def_ci.replacement_threshold, step=1, key=f"ct_{i}")
+        c_repl = c2.number_input("Replace cost ₹", 0, value=int(_def_ci.full_replacement_cost), step=1000, key=f"crc_{i}")
+        c_spare = st.number_input("Spare inventory ₹", 0, value=int(_def_ci.spare_inventory_cost), step=1000, key=f"cs_{i}")
         st.markdown("**Failure Model**")
         _FAIL_DIST = ["exponential", "weibull"]
         c_fdist = st.selectbox("Distribution", _FAIL_DIST,
-                               index=_FAIL_DIST.index(_DEF_C.failure_distribution), key=f"cfd_{i}")
-        c_wshape = st.number_input("Weibull β", 0.1, 5.0, _DEF_C.weibull_shape, 0.1, key=f"cwb_{i}",
+                               index=_FAIL_DIST.index(_def_ci.failure_distribution), key=f"cfd_{i}")
+        c_wshape = st.number_input("Weibull β", 0.1, value=_def_ci.weibull_shape, step=0.1, key=f"cwb_{i}",
                                    help="Shape: β<1 infant mortality, β=1 exponential, β>1 wear-out",
                                    disabled=(c_fdist != "weibull"))
         
@@ -448,39 +488,33 @@ with st.sidebar.expander("Charger Variants"):
 
 # --- Station ---
 with st.sidebar.expander("Station & Infrastructure"):
+    s_num = st.number_input("Stations", 1, value=_DEF_S.num_stations, step=1, key="s_num")
+    s_hours = st.number_input("Operating hrs/day", 1.0, value=_DEF_S.operating_hours_per_day, step=1.0, key="s_hours")
     c1, c2 = st.columns(2)
-    s_num = c1.number_input("Stations", 1, 100, _DEF_S.num_stations, 1)
-    s_docks = c2.number_input("Docks per stn", 1, 50, _DEF_S.docks_per_station, 1)
-    s_hours = st.number_input("Operating hrs/day", 1.0, 24.0, _DEF_S.operating_hours_per_day, 1.0)
+    s_cab = c1.number_input("Cabinet cost ₹", 0, value=int(_DEF_S.cabinet_cost), step=5000, key="s_cab")
+    s_site = c2.number_input("Site prep ₹", 0, value=int(_DEF_S.site_prep_cost), step=5000, key="s_site")
     c1, c2 = st.columns(2)
-    s_cab = c1.number_input("Cabinet cost ₹", 0, 500000, int(_DEF_S.cabinet_cost), 5000)
-    s_site = c2.number_input("Site prep ₹", 0, 500000, int(_DEF_S.site_prep_cost), 5000)
-    c1, c2 = st.columns(2)
-    s_grid = c1.number_input("Grid connection ₹", 0, 500000, int(_DEF_S.grid_connection_cost), 5000)
-    s_sw = c2.number_input("Software ₹", 0, 1000000, int(_DEF_S.software_cost), 10000)
-    s_dep = st.number_input("Security deposit ₹", 0, 500000, int(_DEF_S.security_deposit), 5000)
+    s_grid = c1.number_input("Grid connection ₹", 0, value=int(_DEF_S.grid_connection_cost), step=5000, key="s_grid")
+    s_sw = c2.number_input("Software ₹", 0, value=int(_DEF_S.software_cost), step=10000, key="s_sw")
+    s_dep = st.number_input("Security deposit ₹", 0, value=int(_DEF_S.security_deposit), step=5000, key="s_dep")
 
-station = StationConfig(
-    cabinet_cost=float(s_cab), site_prep_cost=float(s_site), grid_connection_cost=float(s_grid),
-    software_cost=float(s_sw), security_deposit=float(s_dep), num_stations=s_num,
-    docks_per_station=s_docks, operating_hours_per_day=s_hours,
-)
+# StationConfig creation deferred until after Revenue (needs fleet size for float % → docks)
 
 # --- OpEx ---
 with st.sidebar.expander("Operating Expenses"):
-    o_tariff = st.number_input("Electricity ₹/kWh", 0.0, 30.0, _DEF_O.electricity_tariff_per_kwh, 0.5)
+    o_tariff = st.number_input("Electricity ₹/kWh", 0.0, value=_DEF_O.electricity_tariff_per_kwh, step=0.5, key="o_tariff")
     c1, c2 = st.columns(2)
-    o_rent = c1.number_input("Rent ₹/mo/stn", 0, 200000, int(_DEF_O.rent_per_month_per_station), 1000)
-    o_aux = c2.number_input("Aux power ₹/mo", 0, 50000, int(_DEF_O.auxiliary_power_per_month), 500)
+    o_rent = c1.number_input("Rent ₹/mo/stn", 0, value=int(_DEF_O.rent_per_month_per_station), step=1000, key="o_rent")
+    o_aux = c2.number_input("Aux power ₹/mo", 0, value=int(_DEF_O.auxiliary_power_per_month), step=500, key="o_aux")
     c1, c2 = st.columns(2)
-    o_prev = c1.number_input("Preventive maint ₹", 0, 50000, int(_DEF_O.preventive_maintenance_per_month_per_station), 500)
-    o_corr = c2.number_input("Corrective maint ₹", 0, 50000, int(_DEF_O.corrective_maintenance_per_month_per_station), 500)
+    o_prev = c1.number_input("Preventive maint ₹", 0, value=int(_DEF_O.preventive_maintenance_per_month_per_station), step=500, key="o_prev")
+    o_corr = c2.number_input("Corrective maint ₹", 0, value=int(_DEF_O.corrective_maintenance_per_month_per_station), step=500, key="o_corr")
     c1, c2 = st.columns(2)
-    o_ins = c1.number_input("Insurance ₹/mo", 0, 50000, int(_DEF_O.insurance_per_month_per_station), 500)
-    o_log = c2.number_input("Logistics ₹/mo", 0, 50000, int(_DEF_O.logistics_per_month_per_station), 1000)
+    o_ins = c1.number_input("Insurance ₹/mo", 0, value=int(_DEF_O.insurance_per_month_per_station), step=500, key="o_ins")
+    o_log = c2.number_input("Logistics ₹/mo", 0, value=int(_DEF_O.logistics_per_month_per_station), step=1000, key="o_log")
     c1, c2 = st.columns(2)
-    o_labor = c1.number_input("Labor ₹/swap", 0.0, 50.0, _DEF_O.pack_handling_labor_per_swap, 0.5)
-    o_overhead = c2.number_input("Overhead ₹/mo", 0, 500000, int(_DEF_O.overhead_per_month), 5000)
+    o_labor = c1.number_input("Labor ₹/swap", 0.0, value=_DEF_O.pack_handling_labor_per_swap, step=0.5, key="o_labor")
+    o_overhead = c2.number_input("Overhead ₹/mo", 0, value=int(_DEF_O.overhead_per_month), step=5000, key="o_overhead")
 
 opex_cfg = OpExConfig(
     electricity_tariff_per_kwh=o_tariff, auxiliary_power_per_month=float(o_aux),
@@ -494,43 +528,65 @@ opex_cfg = OpExConfig(
 
 # --- Revenue ---
 with st.sidebar.expander("Revenue"):
-    r_price = st.number_input("Price per swap ₹", 0.0, 200.0, _DEF_R.price_per_swap, 5.0, help="Per vehicle visit, not per pack")
+    r_price = st.number_input("Price per swap ₹", 0.0, value=_DEF_R.price_per_swap, step=5.0, help="Per vehicle visit, not per pack", key="r_price")
     c1, c2 = st.columns(2)
-    r_fleet = c1.number_input("Initial fleet", 1, 100000, _DEF_R.initial_fleet_size, 50)
-    r_add = c2.number_input("Monthly additions", 0, 5000, _DEF_R.monthly_fleet_additions, 10)
+    r_fleet = c1.number_input("Initial fleet", 1, value=_DEF_R.initial_fleet_size, step=50, key="r_fleet")
+    r_add = c2.number_input("Monthly additions", 0, value=_DEF_R.monthly_fleet_additions, step=10, key="r_add")
+    r_float_pct = st.number_input(
+        "Float %", 1.0, 100.0, value=_DEF_S.battery_float_pct * 100, step=1.0, key="r_float_pct",
+        help="Extra packs at stations as % of fleet packs (fleet × packs/vehicle). "
+             "Determines docks per station.",
+    )
 
 revenue_cfg = RevenueConfig(price_per_swap=r_price, initial_fleet_size=r_fleet, monthly_fleet_additions=r_add)
+
+# ── Compute docks_per_station from float % ──────────────────────────
+_computed_docks = compute_docks_from_float(
+    r_fleet, vehicle.packs_per_vehicle, r_float_pct / 100.0, s_num,
+)
+
+station = StationConfig(
+    cabinet_cost=float(s_cab), site_prep_cost=float(s_site), grid_connection_cost=float(s_grid),
+    software_cost=float(s_sw), security_deposit=float(s_dep), num_stations=s_num,
+    docks_per_station=_computed_docks, operating_hours_per_day=s_hours,
+    battery_float_pct=r_float_pct / 100.0,
+)
+
+st.sidebar.caption(
+    f"Computed docks/station: **{_computed_docks}** "
+    f"(= ⌈{r_fleet} × {vehicle.packs_per_vehicle} × {r_float_pct:.0f}% ÷ {s_num}⌉)"
+)
 
 # --- Chaos ---
 with st.sidebar.expander("Risk Factors"):
     c1, c2 = st.columns(2)
-    ch_sab = c1.number_input("Sabotage %/mo", 0.0, 10.0, _DEF_CH.sabotage_pct_per_month * 100, 0.1, format="%.1f")
-    ch_aggr = c2.number_input("Aggressiveness", 0.1, 3.0, _DEF_CH.aggressiveness_index, 0.1, key="ch_aggr")
+    ch_sab = c1.number_input("Sabotage %/mo", 0.0, value=_DEF_CH.sabotage_pct_per_month * 100, step=0.1, format="%.1f", key="ch_sab")
+    ch_aggr = c2.number_input("Aggressiveness", 0.1, value=_DEF_CH.aggressiveness_index, step=0.1, key="ch_aggr")
 
 chaos_cfg = ChaosConfig(sabotage_pct_per_month=ch_sab / 100, aggressiveness_index=ch_aggr, thermal_throttling_factor=1.0)
 
 # --- Finance (Phase 3) ---
 with st.sidebar.expander("Finance"):
     c1, c2 = st.columns(2)
-    f_debt_pct = c1.number_input("Debt % of CapEx", 0, 100, int(_DEF_F.debt_pct_of_capex * 100), 5, key="f_debt")
-    f_rate = c2.number_input("Interest rate %", 0.0, 50.0, _DEF_F.interest_rate_annual * 100, 0.5, key="f_rate", format="%.1f")
+    f_debt_pct = c1.number_input("Debt % of CapEx", 0, value=int(_DEF_F.debt_pct_of_capex * 100), step=5, key="f_debt")
+    f_rate = c2.number_input("Interest rate %", 0.0, value=_DEF_F.interest_rate_annual * 100, step=0.5, key="f_rate", format="%.1f")
     c1, c2 = st.columns(2)
-    f_tenor = c1.number_input("Loan tenor mo", 12, 360, _DEF_F.loan_tenor_months, 12, key="f_tenor")
-    f_grace = c2.number_input("Grace period mo", 0, 60, _DEF_F.grace_period_months, 3, key="f_grace")
+    f_tenor = c1.number_input("Loan tenor mo", 12, value=_DEF_F.loan_tenor_months, step=12, key="f_tenor")
+    f_grace = c2.number_input("Grace period mo", 0, value=_DEF_F.grace_period_months, step=3, key="f_grace")
     c1, c2 = st.columns(2)
     _DEPR_OPTS = ["straight_line", "wdv"]
     f_depr = c1.selectbox("Depreciation", _DEPR_OPTS, index=_DEPR_OPTS.index(_DEF_F.depreciation_method), key="f_depr")
-    f_life = c2.number_input("Asset life mo", 12, 360, _DEF_F.asset_useful_life_months, 12, key="f_life")
+    f_life = c2.number_input("Asset life mo", 12, value=_DEF_F.asset_useful_life_months, step=12, key="f_life")
     c1, c2 = st.columns(2)
-    f_tax = c1.number_input("Tax rate %", 0, 60, int(_DEF_F.tax_rate * 100), 1, key="f_tax")
-    f_wdv = c2.number_input("WDV rate %", 0, 100, int(_DEF_F.wdv_rate_annual * 100), 5, key="f_wdv",
+    f_tax = c1.number_input("Tax rate %", 0, value=int(_DEF_F.tax_rate * 100), step=1, key="f_tax")
+    f_wdv = c2.number_input("WDV rate %", 0, value=int(_DEF_F.wdv_rate_annual * 100), step=5, key="f_wdv",
                             disabled=(f_depr != "wdv"))
     _TV_OPTS = ["salvage", "gordon_growth", "none"]
     f_tv = st.selectbox("Terminal value", _TV_OPTS, index=_TV_OPTS.index(_DEF_F.terminal_value_method), key="f_tv")
     c1, c2 = st.columns(2)
-    f_tg = c1.number_input("Growth rate %", 0.0, 10.0, _DEF_F.terminal_growth_rate * 100, 0.5, key="f_tg",
+    f_tg = c1.number_input("Growth rate %", 0.0, value=_DEF_F.terminal_growth_rate * 100, step=0.5, key="f_tg",
                            disabled=(f_tv != "gordon_growth"))
-    f_dscr = c2.number_input("DSCR covenant", 0.5, 3.0, _DEF_F.dscr_covenant_threshold, 0.1, key="f_dscr")
+    f_dscr = c2.number_input("DSCR covenant", 0.5, value=_DEF_F.dscr_covenant_threshold, step=0.1, key="f_dscr")
 
 finance_cfg = FinanceConfig(
     debt_pct_of_capex=f_debt_pct / 100,
@@ -550,28 +606,33 @@ finance_cfg = FinanceConfig(
 with st.sidebar.expander("Demand Model", expanded=(sim_engine == "stochastic")):
     st.markdown("**Distribution Type**")
     _DEMAND_DIST = ["poisson", "gamma", "bimodal"]
-    d_dist = st.selectbox("Distribution", _DEMAND_DIST, 
+    d_dist = st.selectbox("Distribution", _DEMAND_DIST,
                           index=_DEMAND_DIST.index(_DEF_D.distribution) if _DEF_D.distribution in _DEMAND_DIST else 0,
                           disabled=(sim_engine == "static"),
-                          help="Poisson: simple count data | Gamma: heavier tails | Bimodal: dual-peak patterns")
+                          help="Poisson: simple count data | Gamma: heavier tails | Bimodal: dual-peak patterns",
+                          key="d_dist")
     
     st.markdown("**Daily Variability**")
     if d_dist == "gamma":
         d_vol = st.slider("Volatility (CoV)", 0.0, 2.0, _DEF_D.volatility, 0.01,
                           disabled=(sim_engine == "static"),
-                          help="Coefficient of Variation (σ/μ). 0.15 = mild, 0.3 = moderate, 0.5+ = high variability")
+                          help="Coefficient of Variation (σ/μ). 0.15 = mild, 0.3 = moderate, 0.5+ = high variability",
+                          key="d_vol")
     elif d_dist == "bimodal":
         d_vol = _DEF_D.volatility  # Not used for bimodal
         c1, c2 = st.columns(2)
         d_bimodal_ratio = c1.slider("Peak 1 weight", 0.1, 0.9, _DEF_D.bimodal_peak_ratio, 0.05,
                                      disabled=(sim_engine == "static"),
-                                     help="Relative weight of first peak")
+                                     help="Relative weight of first peak",
+                                     key="d_bimodal_ratio")
         d_bimodal_sep = c2.slider("Peak separation", 0.1, 2.0, _DEF_D.bimodal_peak_separation, 0.1,
                                    disabled=(sim_engine == "static"),
-                                   help="Distance between peaks (× mean)")
+                                   help="Distance between peaks (× mean)",
+                                   key="d_bimodal_sep")
         d_bimodal_std = st.slider("Peak width", 0.05, 0.5, _DEF_D.bimodal_std_ratio, 0.05,
                                    disabled=(sim_engine == "static"),
-                                   help="Standard deviation of each peak (× mean)")
+                                   help="Standard deviation of each peak (× mean)",
+                                   key="d_bimodal_std")
     else:  # poisson
         d_vol = _DEF_D.volatility
         d_bimodal_ratio = _DEF_D.bimodal_peak_ratio
@@ -581,12 +642,14 @@ with st.sidebar.expander("Demand Model", expanded=(sim_engine == "stochastic")):
     
     st.markdown("**Temporal Patterns**")
     c1, c2 = st.columns(2)
-    d_wknd = c1.number_input("Weekend factor", 0.0, 2.0, _DEF_D.weekend_factor, 0.05,
+    d_wknd = c1.number_input("Weekend factor", 0.0, value=_DEF_D.weekend_factor, step=0.05,
                              disabled=(sim_engine == "static"),
-                             help="Demand multiplier for Sat/Sun")
-    d_season = c2.number_input("Seasonal amplitude", 0.0, 1.0, _DEF_D.seasonal_amplitude, 0.05,
+                             help="Demand multiplier for Sat/Sun",
+                             key="d_wknd")
+    d_season = c2.number_input("Seasonal amplitude", 0.0, value=_DEF_D.seasonal_amplitude, step=0.05,
                                disabled=(sim_engine == "static"),
-                               help="Peak-to-trough amplitude")
+                               help="Peak-to-trough amplitude",
+                               key="d_season")
     
     # Preview button
     if sim_engine == "stochastic":
@@ -616,6 +679,37 @@ scenario = Scenario(
     demand=demand_cfg, finance=finance_cfg, simulation=sim_cfg,
 )
 st.session_state["scenario"] = scenario
+
+# --- Presets (save / load / reset configuration) ---
+st.sidebar.markdown("---")
+with st.sidebar.expander("Presets", expanded=False):
+    st.download_button(
+        "Save Configuration",
+        data=scenario.model_dump_json(indent=2),
+        file_name="zng_config.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+    uploaded = st.file_uploader("Load Configuration", type=["json"], key="preset_upload")
+    if uploaded is not None and not st.session_state.get("_preset_applied"):
+        try:
+            loaded_scenario = Scenario.model_validate_json(uploaded.read())
+            st.session_state["loaded_preset"] = loaded_scenario
+            st.session_state["_preset_applied"] = True
+            _clear_sidebar_widget_state()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Invalid config file: {e}")
+
+    if uploaded is None:
+        st.session_state.pop("_preset_applied", None)
+
+    if st.button("Reset to Defaults", use_container_width=True):
+        st.session_state.pop("loaded_preset", None)
+        st.session_state.pop("_preset_applied", None)
+        _clear_sidebar_widget_state()
+        st.rerun()
 
 run_clicked = st.sidebar.button("Run Simulation", type="primary", use_container_width=True)
 
@@ -1190,7 +1284,7 @@ with operations_tab:
 
     with st.expander("Show inventory formulas"):
         st.markdown(f"**Active packs** — `fleet × packs_per_vehicle` = {d0.initial_fleet_size:,} × {v.packs_per_vehicle} = **{d0.packs_on_vehicles:,}**")
-        st.markdown(f"**Float packs** — `stations × docks_per_station` = {station.num_stations} × {station.docks_per_station} = **{d0.packs_in_docks:,}**")
+        st.markdown(f"**Float packs** — `⌈fleet × packs/veh × float% ÷ stations⌉ × stations` = ⌈{d0.initial_fleet_size:,} × {v.packs_per_vehicle} × {station.battery_float_pct:.0%} ÷ {station.num_stations}⌉ × {station.num_stations} = **{d0.packs_in_docks:,}**")
         st.markdown(f"**Total inventory** — {d0.packs_on_vehicles:,} + {d0.packs_in_docks:,} = **{d0.total_packs:,}**")
 
     # --- Key operating metrics ---
@@ -2020,20 +2114,20 @@ with intelligence_tab:
         key="ps_target",
     )
     ps_confidence = ps_cols[1].number_input(
-        "Confidence %", 10.0, 99.0, 50.0, 10.0,
+        "Confidence %", 10.0, value=50.0, step=10.0,
         key="ps_conf",
         help="For stochastic: 50 = median must pass, 90 = P10 must pass",
     )
-    ps_min = ps_cols[2].number_input("Min fleet", 10, 10000, 10, 10, key="ps_min")
-    ps_max = ps_cols[3].number_input("Max fleet", 50, 50000, 2000, 100, key="ps_max")
+    ps_min = ps_cols[2].number_input("Min fleet", 10, value=10, step=10, key="ps_min")
+    ps_max = ps_cols[3].number_input("Max fleet", 50, value=2000, step=100, key="ps_max")
 
     ps_extra_cols = st.columns([1, 1, 2])
     ps_be_target = ps_extra_cols[0].number_input(
-        "Break-even target (months)", 6, 240, sim_cfg.horizon_months, 6,
+        "Break-even target (months)", 6, value=sim_cfg.horizon_months, step=6,
         key="ps_be", disabled=(ps_target != "break_even_within"),
     )
     ps_max_iter = ps_extra_cols[1].number_input(
-        "Max search steps", 3, 30, 15, 1, key="ps_iter",
+        "Max search steps", 3, value=15, step=1, key="ps_iter",
     )
     ps_charger_idx = 0
     if multi_charger:

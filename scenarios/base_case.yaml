@@ -83,6 +83,7 @@ station:
   security_deposit: 20000
   num_stations: 5
   docks_per_station: 8
+  battery_float_pct: 0.027
   operating_hours_per_day: 18
 
 opex:

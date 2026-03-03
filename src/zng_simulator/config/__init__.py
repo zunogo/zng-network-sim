@@ -3,7 +3,7 @@
 from zng_simulator.config.vehicle import VehicleConfig
 from zng_simulator.config.battery import PackSpec
 from zng_simulator.config.charger import ChargerVariant
-from zng_simulator.config.station import StationConfig
+from zng_simulator.config.station import StationConfig, compute_docks_from_float
 from zng_simulator.config.opex import OpExConfig
 from zng_simulator.config.revenue import RevenueConfig
 from zng_simulator.config.chaos import ChaosConfig
@@ -16,6 +16,7 @@ __all__ = [
     "PackSpec",
     "ChargerVariant",
     "StationConfig",
+    "compute_docks_from_float",
     "OpExConfig",
     "RevenueConfig",
     "ChaosConfig",
