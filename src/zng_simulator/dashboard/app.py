@@ -552,10 +552,7 @@ station = StationConfig(
     battery_float_pct=r_float_pct / 100.0,
 )
 
-st.sidebar.caption(
-    f"Computed docks/station: **{_computed_docks}** "
-    f"(= ⌈{r_fleet} × {vehicle.packs_per_vehicle} × {r_float_pct:.0f}% ÷ {s_num}⌉)"
-)
+st.sidebar.caption(f"Computed docks/station: **{_computed_docks}**")
 
 # --- Chaos ---
 with st.sidebar.expander("Risk Factors"):
@@ -1209,14 +1206,19 @@ def _continue_in_chat_button(tab_key: str) -> None:
 
 # Tabs are defined BEFORE the simulation guard so that the Chat tab is
 # always accessible — even without running a sidebar simulation first.
-operations_tab, finance_tab, intelligence_tab, chat_tab = st.tabs(
-    ["Operations", "Finance", "Intelligence", "Chat"]
+operations_tab, finance_tab, intelligence_tab, chat_tab, deck_tab = st.tabs(
+    ["Operations", "Finance", "Intelligence", "Chat", "Deck"]
 )
 
 # Chat tab — always available (no simulation dependency)
 with chat_tab:
     from zng_simulator.dashboard.chat.tab import render_chat_tab
     render_chat_tab()
+
+# Deck tab — always available (no simulation dependency)
+with deck_tab:
+    from zng_simulator.dashboard.deck.tab import render_deck_tab
+    render_deck_tab()
 
 # Guard: if no simulation has been run yet, show placeholder and stop
 if not (run_clicked or "results" in st.session_state):
