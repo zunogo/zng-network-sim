@@ -359,7 +359,7 @@ class TestApplyTunedParameters:
         tuned_scenario, tuned_charger = apply_tuned_parameters(scenario, charger, tune)
 
         # Original unchanged
-        assert scenario.pack.cycle_degradation_rate_pct == 0.01
+        assert scenario.pack.cycle_degradation_rate_pct == 0.015
 
         # Tuned values applied
         beta_params = [p for p in tune.parameters if "cycle_degradation" in p.param_path]
@@ -392,5 +392,5 @@ class TestApplyTunedParameters:
         tuned_s, tuned_c = apply_tuned_parameters(scenario, charger, tune)
 
         # Originals untouched
-        assert scenario.pack.cycle_degradation_rate_pct == 0.01
+        assert scenario.pack.cycle_degradation_rate_pct == 0.015
         assert charger.mtbf_hours == 80_000

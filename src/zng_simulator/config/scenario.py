@@ -27,18 +27,18 @@ class SimulationConfig(BaseModel):
 
     # --- Phase 2: engine selection -----------------------------------------------
     engine: Literal["static", "stochastic"] = Field(
-        default="static",
+        default="stochastic",
         description="Engine type: 'static' (Phase 1 deterministic) or "
                     "'stochastic' (Phase 2 Monte-Carlo with demand noise, "
                     "degradation cohorts, and charger failure draws).",
     )
     random_seed: int | None = Field(
-        default=None,
+        default=42,
         description="Optional RNG seed for reproducible stochastic runs. "
                     "None = non-deterministic.",
     )
     monte_carlo_runs: int = Field(
-        default=100,
+        default=1,
         ge=1,
         le=10_000,
         description="Number of Monte-Carlo iterations when engine='stochastic'. "

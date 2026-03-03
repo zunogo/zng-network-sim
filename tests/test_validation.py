@@ -374,7 +374,7 @@ class TestSimulationValidation:
     def test_defaults_are_valid(self):
         s = SimulationConfig()
         assert s.horizon_months >= 1
-        assert s.engine == "static"
+        assert s.engine == "stochastic"
         assert s.monte_carlo_runs >= 1
 
     def test_zero_horizon_rejected(self):

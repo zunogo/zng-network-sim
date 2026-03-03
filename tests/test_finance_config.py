@@ -11,7 +11,7 @@ class TestFinanceConfigDefaults:
     def test_default_construction(self):
         cfg = FinanceConfig()
         assert cfg.debt_pct_of_capex == 0.70
-        assert cfg.interest_rate_annual == 0.12
+        assert cfg.interest_rate_annual == 0.18
         assert cfg.loan_tenor_months == 60
         assert cfg.grace_period_months == 6
         assert cfg.depreciation_method == "straight_line"

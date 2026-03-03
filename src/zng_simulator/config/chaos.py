@@ -7,7 +7,7 @@ class ChaosConfig(BaseModel):
     """Stochastic / risk inputs."""
 
     sabotage_pct_per_month: float = Field(
-        default=0.005, ge=0, le=1.0,
+        default=0.01, ge=0, le=1.0,
         description="Monthly rate of pack loss (theft/vandalism), e.g. 0.005 = 0.5%",
     )
     aggressiveness_index: float = Field(default=1.0, ge=0.1, description="Driver behavior multiplier on degradation")

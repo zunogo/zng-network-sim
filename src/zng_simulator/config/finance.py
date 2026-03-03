@@ -20,7 +20,7 @@ class FinanceConfig(BaseModel):
                     "0 = all equity, 1 = fully leveraged.",
     )
     interest_rate_annual: float = Field(
-        default=0.12, ge=0, le=0.50,
+        default=0.18, ge=0, le=0.50,
         description="Annual interest rate on debt.",
     )
     loan_tenor_months: int = Field(
