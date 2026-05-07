@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import math
 import os
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -36,7 +37,10 @@ from zng_simulator.config import (
     VehicleConfig,
     compute_docks_from_float,
 )
+from zng_simulator.dashboard._format import fmt_inr as _fmt_inr
+from zng_simulator.dashboard.reports.unit_economics import build_unit_economics_pdf
 from zng_simulator.engine.orchestrator import run_engine
+from zng_simulator.finance.bundle import compute_finance_bundle
 from zng_simulator.engine.field_data import (
     apply_tuned_parameters,
     auto_tune_parameters,
@@ -312,15 +316,6 @@ else:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _fmt_inr(val: float) -> str:
-    """Format INR with lakhs / crores for large values."""
-    if abs(val) >= 1e7:
-        return f"₹{val / 1e7:,.2f} Cr"
-    if abs(val) >= 1e5:
-        return f"₹{val / 1e5:,.2f} L"
-    return f"₹{val:,.0f}"
-
 
 def _card(icon: str, label: str, value: str, accent: str = "#6c5ce7") -> str:
     """Return HTML for a styled metric card with colored top accent."""
@@ -1762,9 +1757,42 @@ with operations_tab:
 # ═══════════════════════════════════════════════════════════════════════════
 with finance_tab:
 
+    @st.cache_data(show_spinner="Building unit economics report…", max_entries=4)
+    def _build_unit_economics_report(scenario_json: str, result_json: str) -> bytes:
+        _sc = Scenario.model_validate_json(scenario_json)
+        _res = SimulationResult.model_validate_json(result_json)
+        _cv = next(
+            (c for c in _sc.charger_variants if c.name == _res.charger_variant_id),
+            _sc.charger_variants[0],
+        )
+        _bundle = compute_finance_bundle(_res, _cv, _sc)
+        return build_unit_economics_pdf(
+            _sc, _res, _bundle, mc_summary=_res.monte_carlo,
+        )
+
     st.divider()
-    st.header("Financial Overview")
-    st.caption("DCF · Debt Schedule · DSCR · P&L · Cash Flow Statement")
+    _hdr_col, _btn_col = st.columns([3, 1.4])
+    with _hdr_col:
+        st.header("Financial Overview")
+        st.caption("DCF · Debt Schedule · DSCR · P&L · Cash Flow Statement")
+    with _btn_col:
+        st.write("")
+        _primary_res = results[0]
+        _primary_cv = charger_variants[0]
+        _pdf_bytes = _build_unit_economics_report(
+            scenario.model_dump_json(),
+            _primary_res.model_dump_json(),
+        )
+        st.download_button(
+            "📄 Export Unit Economics Report",
+            data=_pdf_bytes,
+            file_name=f"zng_unit_economics_{date.today().isoformat()}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            type="primary",
+            key="ue_report_download",
+        )
+        st.caption(f"Variant: **{_primary_cv.name}**")
 
     # ── Compute finance for first charger (or primary) ──────────────────
     def _compute_finance(res: SimulationResult, cv: ChargerVariant):
